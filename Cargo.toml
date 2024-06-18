@@ -1,0 +1,42 @@
+[package]
+name = "cgh"
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev]
+opt-level = 3
+
+[profile.test]
+opt-level = 3
+
+[features]
+sync_check = []
+
+[dependencies]
+cust = "0.3.2"
+crossbeam = "0.8"
+num-complex = "0.4"
+arrayfire = "3.8.0"
+imgui-glium-renderer = "0.8.0"
+imgui-winit-support = "0.8.0"
+env_logger = "0.9.0"
+log = "0.4.14"
+clap = { version = "3.1.18", features = ["derive"] }
+glium = { version = "0.30", default-features = true }
+imgui = { version = "0.8.0", features = ["tables-api"] }
+data = { git = "https://github.com/RoLiLab/data-rs.git" }
+dcam = { git = "https://github.com/RoLiLab/dcam-rs.git" }
+dcam-sys = { git = "https://github.com/RoLiLab/dcam-rs.git" }
+nimhddk = { git = "https://github.com/RoLiLab/nimhddk-rs.git" }
+# nimhddk = { git = "/home/rahul/Repos/nimhddk-rs/" }
+async-writer = { git = "https://github.com/RoLiLab/async-writer-rs.git" }
+roli-fse = { git = "https://github.com/RoLiLab/roli-fse-rs.git" }
+hdf5 = { git = "https://github.com/aldanor/hdf5-rust.git" }
+npp = { git = "https://github.com/RoLiLab/npp-rs.git" }
+npp-sys = { git = "https://github.com/RoLiLab/npp-rs.git" }
+roli-image = { git = "https://github.com/RoLiLab/roli-image-rs.git" }
+imgui-utils = { git = "https://github.com/RoLiLab/imgui-utils.git" }
+ixxat = { git = "https://github.com/RoLiLab/ixxat-rs.git" }
+ixxat-sys = { git = "https://github.com/RoLiLab/ixxat-rs.git" }
+ndarray = { git = "https://github.com/rust-ndarray/ndarray.git" }
+zmq = { git = "https://github.com/erickt/rust-zmq.git" }
