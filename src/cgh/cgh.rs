@@ -56,22 +56,15 @@ impl Cgh {
         // camera.set_trigger_active(dcam::TriggerActive::Edge);
         camera.set_trigger_polarity(dcam::TriggerPolarity::Positive);
         camera.set_binning(2);
-        // camera.set_exposure(0.00598);
-        camera.set_exposure(0.00144);
         // camera.set_exposure(0.00072);
+        camera.set_exposure(0.00144);
+        // camera.set_exposure(0.00598);
         // camera.set_trigger_global_exposure(dcam::TriggerGlobalExposure::GlobalReset);
-        /*
+        
         camera.properties.set_width(1024 * 2);
         camera.properties.set_height(512 * 2);
         camera.properties.set_offset_x(512 * 2);
         camera.properties.set_offset_y(256 * 2);
-        */
-        /*
-        camera.properties.set_width(512 * 2);
-        camera.properties.set_height(256 * 2);
-        camera.properties.set_offset_x(768 * 2);
-        camera.properties.set_offset_y(448 * 2);
-        */
         
         let calibration_side_488 = SpimCalibration::new(0.0, 0.0);
         let calibration_side_561 = SpimCalibration::new(0.0, 0.0);
@@ -80,10 +73,8 @@ impl Cgh {
         let shared_state = Arc::new(SharedState::new(cgh_mode, size));
         let camera = Arc::new(Mutex::new(camera));
 
-        // let phmask_filepath = PathBuf::from("/data/rahul/data/cgh_data/phase_mask_file.bin");
-        // let tgtimg_filepath = PathBuf::from("/data/rahul/data/cgh_data/phase_mask_file.bin");
-        let slm_size_x = 512;
-        let slm_size_y = 512;
+        let slm_size_x = 1920;
+        let slm_size_y = 1152;
         let slm_size = (slm_size_x, slm_size_y);
         let slm_bitdepth = 8;
         let slm_path = fl_path.clone();
@@ -109,26 +100,32 @@ impl Cgh {
             slm_path,
         }
     }
-    pub fn start(&mut self, gpu_index: i32, z_start_mm: f64, z_end_mm: f64, stop: Arc<AtomicBool>, thread_panic: Arc<AtomicBool>) {
+    pub fn start(&mut self, gpu_index: i32, stop: Arc<AtomicBool>, thread_panic: Arc<AtomicBool>) {
         debug!("start");
         let daq = self.daq.clone();
         assert_eq!(self.daq.DO().sample_clock(), DO_SAMPLE_CLK);
         assert_eq!(self.daq.AO().sample_clock(), AO_SAMPLE_CLK);
 
+        let stack_mode = self.shared_state.cgh_mode == CghMode::Stack488 || self.shared_state.cgh_mode == CghMode::Stack561 || self.shared_state.cgh_mode == CghMode::Stack2ch;
+        let z_start_mm: f64 = if stack_mode {150.0e-3} else {1.0e-3};
+        let z_end_mm: f64 = if stack_mode {-150.0e-3} else {0.0e-3};
+        
         let period_fast_3d = 20.0e-3;
         let period_fast_plane = 20.0e-3;
-        let period_spiral = 20.0e-3;
+        let period_spiral = 1.0e-3;
         let period_slm = 100.0e-3;        
-        
+    
         let bidir_on = false;
         let period_fast = if self.shared_state.cgh_mode == CghMode::CghInplane {period_fast_plane} else {period_fast_3d};
-        let pulse_period = 30.0;
-        let pulse_on_times: Vec<f64> = vec![0.0, 50e-3, 100e-3, 200e-3, 500e-3];
-        // let pulse_on_times: Vec<f64> = vec![100e-3, 500e-3, 1000e-3];
+        let pulse_period = 100e-3;
+        let mut pulse_on_times: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.5e-3, 0.5e-3, 0.5e-3, 0.5e-3, 0.5e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 2e-3, 2e-3, 2e-3, 2e-3, 2e-3];
+        // let mut pulse_on_times: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.0, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3];
+        // let mut pulse_on_times: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.0, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 5e-3, 5e-3, 5e-3, 5e-3, 5e-3, 10e-3, 10e-3, 10e-3, 10e-3, 10e-3];
+        pulse_on_times.extend(vec![0.0; 100]);
         let n_pulses = pulse_on_times.len();
 
         let steptime_slow_galvo = match self.shared_state.cgh_mode {
-            CghMode::CghInplane => n_pulses as f64*pulse_period,
+            // CghMode::CghInplane => n_pulses as f64*pulse_period,
             CghMode::Stack2ch => 2.0 * period_fast,
             _ => period_fast
         };
@@ -136,11 +133,11 @@ impl Cgh {
         let mut fast_galvo_side_peak = 10.0; 
         if self.shared_state.cgh_mode == CghMode::CghInplane {
             // fast_galvo_front_peak = 0.625;
-            fast_galvo_side_peak = 1.50;       
+            fast_galvo_side_peak = 5.0;       
             // fast_galvo_front_peak = 4.0;
             // fast_galvo_side_peak = 10.0;
         } 
-        let spiral_amp = 10e-3; //voltage amplitude for spiral galvo 
+        let spiral_amp = 2.0e-3; //voltage amplitude for spiral galvo 
 
         let t0 = period_fast * 0.05;
         let on_laser_s = match bidir_on { 
@@ -161,13 +158,13 @@ impl Cgh {
         let spiral_galvo_x = Spiral::new(SpiralData { period_s: period_spiral, offset_s: t0, start_volts: -1.0*spiral_amp, end_volts: spiral_amp, sine_on: true });
         let spiral_galvo_y = Spiral::new(SpiralData { period_s: period_spiral, offset_s: t0, start_volts: -1.0*spiral_amp, end_volts: spiral_amp, sine_on: false });
 
-        let z_step_mm = if self.shared_state.cgh_mode == CghMode::CghInplane {-5.0e-3} else {-1.0e-3};
+        let z_step_mm = if self.shared_state.cgh_mode == CghMode::CghInplane {-0.1e-3} else {-1.0e-3};
         assert!(z_end_mm < z_start_mm);
         let z_span_mm = z_end_mm - z_start_mm;
         let n_slices = (z_span_mm / z_step_mm).ceil() as usize;
         let z_span_mm = (n_slices - 1) as f64 * z_step_mm;
         let z_end_mm = z_start_mm + z_span_mm;
-        let z_561_488_offset_mm = 0.000;
+        let z_561_488_offset_mm = -0.003;
 
         self.calibration_side_488 = self.spim_data.lock().unwrap().read_calib_coeff("side");
         self.calibration_side_561 = SpimCalibration::new(self.calibration_side_488.volts_per_mm, self.calibration_side_488.volts_at_0mm-self.calibration_side_488.volts_per_mm*z_561_488_offset_mm);
@@ -199,13 +196,13 @@ impl Cgh {
         };
         let laser_period_561 = match self.shared_state.cgh_mode { 
             CghMode::Stack2ch => 2.0 * period_fast,
-            CghMode::CghInplane => steptime_slow_galvo,
+            // CghMode::CghInplane => steptime_slow_galvo,
             _ => period_fast
         };
         let offset_488 = t0;
         let offset_561 = match self.shared_state.cgh_mode { 
             CghMode::Stack2ch => period_fast + t0,
-            CghMode::CghInplane => 10.0*period_fast + t0,
+            // CghMode::CghInplane => 10.0*period_fast + t0,
             _ => t0
         };
         let obis_488 = Pulse::new(PulseData { period_s: laser_period_488, on_s: on_488_s, offset_s: offset_488 });
@@ -223,7 +220,7 @@ impl Cgh {
         match self.shared_state.cgh_mode { 
             CghMode::CghInplane => {
                 self.daq.AO().add_streaming_channel(0, move |data, i| fast_galvo_side.chunk(data, i));
-                self.daq.AO().add_streaming_channel(1, move |data, i| slow_galvo_side_488.chunk(data, i));
+                // self.daq.AO().add_streaming_channel(1, move |data, i| slow_galvo_side_488.chunk(data, i));
                 self.daq.AO().add_streaming_channel(2, move |data, i| spiral_galvo_x.chunk(data, i));
                 self.daq.AO().add_streaming_channel(3, move |data, i| spiral_galvo_y.chunk(data, i));
             },
@@ -243,7 +240,7 @@ impl Cgh {
                 self.daq.AO().add_streaming_channel(0, move |data, i| fast_galvo_side.chunk(data, i));
             },
             _ => {
-                println!("OnDemand");
+                println!("Ondemand");
             }
         };
         let dout = daq.DO();
@@ -262,6 +259,7 @@ impl Cgh {
         let stream = self.stream.clone();
         let fl_filename: PathBuf = self.fl_path.clone().join("fl.bin");
         let spim_data = self.spim_data.clone();
+        let size = self.size.clone();
         let slm = self.slm.clone();
         let slm_path = self.slm_path.clone();        
         let n_buffers = 3;
@@ -278,7 +276,7 @@ impl Cgh {
                     sample_z_stage.move_abs_sync(z_start_mm as f32);
                 }
                 let rx = camera.lock().unwrap().start(thread_panic.clone(), shared_state.frame_rate.clone());
-                if shared_state.cgh_mode != CghMode::OnDemand {
+                if shared_state.cgh_mode != CghMode::Ondemand {
                     println!("Starting AO");
                     aout.start_as_follower(true);
                 }
@@ -291,7 +289,7 @@ impl Cgh {
                     let dcam_frame_index = image.frame_index;
                     let sweep_index = dcam_frame_index as usize / n_slices;
                     let slice_index = match shared_state.cgh_mode {
-                        CghMode::CghInplane => (dcam_frame_index as usize / (steptime_slow_galvo/period_fast) as usize) as usize % n_slices,
+                        CghMode::CghInplane => (dcam_frame_index as usize / (n_pulses as f64*pulse_period/period_fast) as usize) as usize % n_slices,
                         CghMode::Stack2ch => (dcam_frame_index as usize / 2 as usize) % n_slices,
                         _ => dcam_frame_index as usize % n_slices
                     };
@@ -335,13 +333,15 @@ impl Cgh {
                             if shared_state.generate_new_holo.load(Relaxed) {
                                 // slm.lock().unwrap().read_target_img_file(&tgt_image_filename);
                                 // slm.lock().unwrap().calc_gs2d(10);
-                                slm.lock().unwrap().calc_superpos3d(shared_state.shift_3d.load());
+                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - (size.0 as f32)/2.0) * (slm.lock().unwrap().slm_size.0 as f32/size.0 as f32) ).floor() as i32;  
+                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - (size.1 as f32)/2.0) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
+                                let cghz:i32 = shared_state.shift_3d.load().2;
+                                println!("cghX: {}", cghx);
+                                println!("cghY: {}", cghy);
+                                println!("cghZ: {}", cghz);
+                                slm.lock().unwrap().calc_superpos3d((cghx, cghy, cghz));
                                 let _ = slm.lock().unwrap().write_phase_mask_file(&phasemask_filename);
                                 shared_state.generate_new_holo.store(false, Relaxed);
-                                println!("cghX: {}", shared_state.shift_3d.load().0);
-                                println!("cghY: {}", shared_state.shift_3d.load().1);
-                                println!("cghZ: {}", shared_state.shift_3d.load().2);
-
                             }
                         },
                         _ => {
@@ -349,13 +349,16 @@ impl Cgh {
                         }
                     }
 
-                    if shared_state.cgh_mode == CghMode::OnDemand {
+                    if shared_state.cgh_mode == CghMode::Ondemand {
                         aout.set(0, shared_state.ao0.load());
                         aout.set(1, shared_state.ao1.load());
                         aout.set(2, shared_state.ao2.load());
                         aout.set(3, shared_state.ao3.load());
                     }
                     if shared_state.cgh_mode == CghMode::SpimCalib {
+                        aout.set(1, shared_state.ao1.load());
+                    }
+                    if shared_state.cgh_mode == CghMode::CghInplane {
                         aout.set(1, shared_state.ao1.load());
                     }
                     let save_divisor = shared_state.save_divisor.load(Relaxed);

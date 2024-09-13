@@ -1,3 +1,4 @@
+#![allow(warnings)] 
 use clap::Parser;
 use log::{debug, info};
 use cust::stream::{Stream, StreamFlags};
@@ -15,7 +16,7 @@ use std::sync::{
 #[clap(author, version, about, long_about = None)]
 
 struct Args {
-    #[clap(arg_enum, default_value_t = CghMode::OnDemand)]
+    #[clap(arg_enum, default_value_t = CghMode::Ondemand)]
     mode: CghMode,
 }
 
@@ -42,9 +43,7 @@ fn main() {
     let mut cgh_ui = CghUI::new(cgh.size, gl_context, textures, ui_stream, ui_stream_context);
     let thread_panic = Arc::new(AtomicBool::new(false));
     let stop_cgh = Arc::new(AtomicBool::new(false));
-    let z_start_mm =10e-3;
-    let z_end_mm = -10e-3;
-    cgh.start(gpu_index, z_start_mm, z_end_mm, stop_cgh.clone(), thread_panic.clone());
+    cgh.start(gpu_index, stop_cgh.clone(), thread_panic.clone());
     system.main_loop(move |_run, ui, display| {
         let size = display.gl_window().window().inner_size();
         let size = [size.width as f32 / hidpi_factor, size.height as f32 / hidpi_factor];
