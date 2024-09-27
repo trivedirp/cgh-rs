@@ -33,6 +33,8 @@ pub struct SharedState {
     pub sample_z_event_status: AtomicU16,
     pub sample_z_position_mm: AtomicCell<f32>,
     pub shift_3d: AtomicCell<(i32,i32,i32)>,
+    pub cgh_zero_ord: AtomicCell<(i32,i32)>,
+    pub save_zero_ord: AtomicBool,
     pub enable_click_cgh: AtomicBool,
     pub generate_new_holo: AtomicBool,
 }
@@ -67,6 +69,8 @@ impl SharedState {
             sample_z_manual_target_mm: AtomicCell::new(0.0f32),
             sample_z_event_status: AtomicU16::new(0u16),
             shift_3d: AtomicCell::new((0,0,0)),
+            cgh_zero_ord: AtomicCell::new((0,0)),
+            save_zero_ord: AtomicBool::new(false),
             enable_click_cgh: AtomicBool::new(false),
             generate_new_holo: AtomicBool::new(false),
         };

@@ -73,7 +73,10 @@ impl CghUI {
             shared_state.shift_3d.store((shift_x,shift_y,shift_z));
         }
         ui.same_line();
-        if ui.button("enable_click_cgh") {
+        if ui.button("save_zero_ord") {
+            shared_state.save_zero_ord.store(true, Release);
+        }
+        ui.same_line();if ui.button("enable_click_cgh") {
             shared_state.enable_click_cgh.store(true, Release);
         }
         ui.same_line();
@@ -134,6 +137,21 @@ impl CghUI {
         self.image.update_from_gpu_u16(&shared_state.d_roi, v_min, v_max);
         let p1 = ui.cursor_pos();
         self.image.display(ui, scale);
+        if shared_state.save_zero_ord.load(Relaxed) {
+            let mut mouse_pos = ui.io().mouse_pos;
+            if  (mouse_pos[1] + ui.scroll_y()) > p1[1] {
+                if ui.io().want_capture_mouse { 
+                    if ui.is_mouse_clicked(MouseButton::Left) {
+                        mouse_pos = ui.io().mouse_pos;
+                        let mut shift_x = (scale*mouse_pos[0]+ui.scroll_x() - p1[0]).floor() as i32;
+                        let mut shift_y = (scale*mouse_pos[1]+ui.scroll_y() - p1[1]).floor() as i32;
+                        shared_state.cgh_zero_ord.store((shift_x,shift_y));
+                        shared_state.save_zero_ord.store(false, Relaxed); 
+                    }
+                } 
+            }
+        }
+        ui.get_foreground_draw_list().add_circle([shared_state.cgh_zero_ord.load().0 as f32+p1[0] as f32, shared_state.cgh_zero_ord.load().1 as f32+p1[1] as f32], 5.0, [0.0, 1.0, 1.0]).thickness(2.0).build();
         if shared_state.enable_click_cgh.load(Relaxed) {
             let mut mouse_pos = ui.io().mouse_pos;
             if  (mouse_pos[1] + ui.scroll_y()) > p1[1] {
