@@ -80,6 +80,18 @@ impl SLMConfig {
         Ok(())
     }
 
+    pub fn send_pong(&mut self) -> Result<()> {
+            match &self.zmq_server {
+            Some(zmq_server) => {
+                self.zmq_server.as_mut().expect("expected zmq server init").ping_pong(); 
+            },
+            None => {
+                // println!("zmq server not on");
+            },      
+        };
+        Ok(())
+    }
+
     pub fn calc_gs2d(&mut self, n_iter:i32) {
         // set_backend(Backend::CUDA); // Or Backend::OPENCL
         // set_device(0);          
@@ -144,8 +156,11 @@ impl SLMConfig {
         let imgc_x= img_size_x as i32/2;
         let imgc_y= img_size_y as i32/2;
         let dk: f32 = 2.0*PI/(img_size_x as f32); 
-        let shift_3d = (0, 20, 0);   
-        let (x_shift, y_shift) = rotate_xy(shift_3d.0,shift_3d.1);
+        // let shift_3d = (0, 20, 0);   
+        //****
+        // shift_3d.0 is shift_y : SLM X is camera Y... 
+        let (x_shift, y_shift) = rotate_xy(shift_3d.1,shift_3d.0);
+        //****
         let z_shift = shift_3d.2;
         let kx_shift = 2.0*PI/(x_shift as f32+1e-2);
         let ky_shift = 2.0*PI/(y_shift as f32+1e-2);

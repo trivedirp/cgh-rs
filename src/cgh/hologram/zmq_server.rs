@@ -1,4 +1,4 @@
-use zmq::{Context, Socket, Message};
+use zmq::{Context, Socket, Message, Error};
 use std::io::{self, Write};
 use std::thread::*;
 use std::time::Duration;
@@ -7,6 +7,7 @@ use serde::{Serialize, Deserialize};
 
 pub struct ZmqServer {
     responder: zmq::Socket,
+    msg: zmq::Message,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -18,11 +19,11 @@ impl ZmqServer {
     pub fn new() -> Self {
         let context = Context::new();
         let responder = context.socket(zmq::REP).unwrap();
+        let mut msg: Message = Message::new();
         let s = format!("tcp://*:5555");
         responder.bind(&s).unwrap();
         responder.set_sndtimeo(10000).unwrap();
         responder.set_rcvtimeo(10000).unwrap();
-        let mut msg: Message = Message::new();
         loop { 
             responder.recv(&mut msg, 0);
             if msg.as_str().unwrap() == "INIT" {     
@@ -33,17 +34,38 @@ impl ZmqServer {
                 sleep(Duration::from_millis(50));
             }
         }
-        Self { responder, }
+        Self { responder, msg,}
     }
 
     pub fn send_img(&mut self, buffer: &Vec<u8>) {
-        let mut msg: Message = Message::new();
+        // let mut msg: Message = Message::new();
         // let phmask = vec![0u8; 1920*1152];   
         // let phmask = Phmask {mask: vec![15u8; 10000],};   
         // let serialized = serde_json::to_vec(&phmask).unwrap();
-        self.responder.recv(&mut msg, 0).unwrap();
-        assert_eq!(msg.as_str().unwrap(), "xfer");
-        println!("Sending SLM phase mask...");
-        self.responder.send(buffer, 0).unwrap();
+        self.responder.recv(&mut self.msg, 0).unwrap();
+        assert_eq!(self.msg.as_str().unwrap(), "ping");
+        if self.msg.as_str().unwrap() == "ping" {
+            println!("Sending SLM phase mask...");
+            self.responder.send(buffer, 0).unwrap();
+        }
+    }
+
+    pub fn ping_pong(&mut self) {
+        // let mut msg: Message = Message::new();
+        match self.responder.recv(&mut self.msg, zmq::DONTWAIT) {
+            Ok(()) => {
+                println!("{}", self.msg.as_str().unwrap());
+                if self.msg.as_str().unwrap() == "ping" {
+                    self.responder.send("pong", 0).unwrap();
+                } else if self.msg.as_str().unwrap() == "INIT" {
+                    self.responder.send("ackINIT", 0).unwrap();
+                }
+            },
+            Err(e) => {
+                if e == zmq::Error::EAGAIN {
+                    // println!("waiting for ping");
+                }
+            }
+        } 
     }
 }
