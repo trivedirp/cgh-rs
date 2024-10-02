@@ -84,7 +84,7 @@ impl CghUI {
         if ui.button("save curr_image") {
             shared_state.save_img.store(true, Release);
         }
-        if shared_state.cgh_mode == CghMode::OnDemand {
+        if shared_state.cgh_mode == CghMode::Ondemand {
             let mut v_max_ao0 = shared_state.ao0.load();
             if Slider::new("AO0:side_fast", -10f32, 10f32).build(ui, &mut v_max_ao0) {
                 shared_state.ao0.store(v_max_ao0);
@@ -119,6 +119,11 @@ impl CghUI {
             }
             ui.same_line();
             ui.text(format!("No of Datapoints: {}", shared_state.n_datapts.load()));
+        } else if shared_state.cgh_mode == CghMode::CghInplane {
+            let mut v_max_ao1 = shared_state.ao1.load();
+            if Slider::new("AO1:side", -5f32, 5f32).build(ui, &mut v_max_ao1) {
+                shared_state.ao1.store(v_max_ao1);
+            }
         } else {
             if ui.button("save_expt_params") {
                 shared_state.save_expt.store(true, Release);

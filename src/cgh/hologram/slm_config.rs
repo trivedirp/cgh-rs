@@ -6,14 +6,14 @@ use std::{
 use num_complex::Complex;
 use arrayfire::*;
 use std::f32::consts::PI;
-use crate::{arr_absargtocplx, arr_floattocplx, binarize, rotate_xy, ZmqClient};
+use crate::{arr_absargtocplx, arr_floattocplx, binarize, rotate_xy, ZmqServer};
 pub struct SLMConfig {
-    slm_size: (u64, u64),
-    slm_bitdepth: i32,
+    pub slm_size: (u64, u64),
+    pub slm_bitdepth: i32,
     dims: Dim4,
     target_img: Array<f32>, 
     phase_mask: Array<u8>,
-    // zmq_client: ZmqClient,
+    zmq_server: ZmqServer,
 }
 
 impl SLMConfig {
@@ -23,7 +23,7 @@ impl SLMConfig {
             dims: Dim4::new(&[slm_size.0, slm_size.1, 1, 1]),
             target_img: constant(0.0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
             phase_mask: constant(0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
-            // zmq_client: ZmqClient::new(),
+            zmq_server: ZmqServer::new(),
         }
     }
 
@@ -49,12 +49,12 @@ impl SLMConfig {
     } 
     
     pub fn write_phase_mask_file(&mut self, filepath: &PathBuf) -> Result<()> {
-        let mut zmq_client = ZmqClient::new();
         let mut file = File::create(filepath).unwrap(); 
         let mut buffer = vec!(u8::default(); self.phase_mask.elements());
-        zmq_client.send_img(&buffer); 
-        self.phase_mask.host(&mut buffer);
+        let mut phase_mask_xpose = transpose(&self.phase_mask, false);
+        phase_mask_xpose.host(&mut buffer);
         let _ = file.write_all(&mut buffer);
+        self.zmq_server.send_img(&buffer); 
         Ok(())
     }
 
@@ -154,9 +154,7 @@ impl SLMConfig {
         let phz = z_shift*k_z;
         let phx: Array<f32> = modulo(&pix_x, &pitch_x, true) * 2.0 as f32 * PI / pitch_x_pix;
         let phy: Array<f32> = modulo(&pix_y, &pitch_y, true) * 2.0 as f32 * PI / pitch_y_pix;
-
         slm_ph = add(&add(&phx, &phy, true), &phz, true);
-
         self.phase_mask = binarize(&slm_ph, self.slm_bitdepth); 
     }
 }

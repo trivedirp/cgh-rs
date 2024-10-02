@@ -2,7 +2,7 @@ use clap::ArgEnum;
 
 #[derive(Debug, Clone, Copy, PartialEq, ArgEnum)]
 pub enum CghMode {
-    OnDemand,
+    Ondemand,
     SpimCalib,
     Stack488,
     Stack561,
