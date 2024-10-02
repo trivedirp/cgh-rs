@@ -1,29 +1,37 @@
 use std::{
-    convert::Into, fs::File, io::{BufReader, Read, Result, Write}, panic::{self, AssertUnwindSafe}, path::PathBuf, sync::{
+    convert::Into, fs::File, io::{BufReader, BufWriter, Read, Result, Write}, panic::{self, AssertUnwindSafe}, path::PathBuf, sync::{
         atomic::{AtomicBool, Ordering::Relaxed},Arc, Mutex, 
     }
 };
 use num_complex::Complex;
 use arrayfire::*;
 use std::f32::consts::PI;
-use crate::{arr_absargtocplx, arr_floattocplx, binarize, rotate_xy, ZmqServer};
+use crate::{arr_absargtocplx, arr_floattocplx, binarize, rotate_xy, ZmqServer, CghMode};
+
+use super::zmq_server;
 pub struct SLMConfig {
     pub slm_size: (u64, u64),
     pub slm_bitdepth: i32,
     dims: Dim4,
     target_img: Array<f32>, 
     phase_mask: Array<u8>,
-    zmq_server: ZmqServer,
+    zmq_server: Option<ZmqServer>,
 }
 
 impl SLMConfig {
-    pub fn new(slm_size: (u64, u64), slm_bitdepth: i32) -> Self {
+    pub fn new(slm_size: (u64, u64), slm_bitdepth: i32, cgh_mode: CghMode) -> Self {
+        let server_on = cgh_mode == CghMode::CghInplane || cgh_mode == CghMode::SpimCalib;
+        // let server_on = cgh_mode == CghMode::CghInplane;
         Self { slm_size,
             slm_bitdepth,
             dims: Dim4::new(&[slm_size.0, slm_size.1, 1, 1]),
             target_img: constant(0.0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
             phase_mask: constant(0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
-            zmq_server: ZmqServer::new(),
+            zmq_server: if server_on {
+                Some(ZmqServer::new())
+            } else {
+                None
+            }
         }
     }
 
@@ -51,10 +59,36 @@ impl SLMConfig {
     pub fn write_phase_mask_file(&mut self, filepath: &PathBuf) -> Result<()> {
         let mut file = File::create(filepath).unwrap(); 
         let mut buffer = vec!(u8::default(); self.phase_mask.elements());
-        let mut phase_mask_xpose = transpose(&self.phase_mask, false);
-        phase_mask_xpose.host(&mut buffer);
-        let _ = file.write_all(&mut buffer);
-        self.zmq_server.send_img(&buffer); 
+        // let mut phase_mask_xpose = transpose(&self.phase_mask, false);
+        // phase_mask_xpose.host(&mut buffer);
+        self.phase_mask.host(&mut buffer);
+        // let _ = file.write_all(&mut buffer);
+        let mut writer = BufWriter::new(file);
+        for value in &buffer {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+        writer.flush()?;
+
+        match &self.zmq_server {
+            Some(zmq_server) => {
+                self.zmq_server.as_mut().expect("expected zmq server init").send_img(&buffer); 
+            },
+            None => {
+                println!("zmq server not on");
+            },      
+        };
+        Ok(())
+    }
+
+    pub fn send_pong(&mut self) -> Result<()> {
+            match &self.zmq_server {
+            Some(zmq_server) => {
+                self.zmq_server.as_mut().expect("expected zmq server init").ping_pong(); 
+            },
+            None => {
+                // println!("zmq server not on");
+            },      
+        };
         Ok(())
     }
 
@@ -121,21 +155,27 @@ impl SLMConfig {
         let slmc_y = slm_size_y as i32/2;
         let imgc_x= img_size_x as i32/2;
         let imgc_y= img_size_y as i32/2;
-        // let dk:f32 = 1.0; 
-        let dk:f32 = 2.0*PI/(img_size_x as f32*1.0); 
-        let (x_shift, y_shift) = rotate_xy(shift_3d.0,shift_3d.1);
+        let dk: f32 = 2.0*PI/(img_size_x as f32); 
+        // let shift_3d = (0, 20, 0);   
+        //****
+        // shift_3d.0 is shift_y : SLM X is camera Y... 
+        let (x_shift, y_shift) = rotate_xy(shift_3d.1,shift_3d.0);
+        //****
         let z_shift = shift_3d.2;
         let kx_shift = 2.0*PI/(x_shift as f32+1e-2);
         let ky_shift = 2.0*PI/(y_shift as f32+1e-2);
         let pitch_x_pix = (kx_shift/dk).floor();
         let pitch_y_pix = (ky_shift/dk).floor();
+        println!("cghX: {}", shift_3d.0);
+        println!("cghY: {}", shift_3d.1);
+        println!("pitchX: {}", pitch_x_pix);
+        println!("pitchY: {}", pitch_y_pix);
 
         let mut k_tot_sq: Array<f32> = constant::<f32>(k_total*k_total, self.dims);  
-        let mut k_z: Array<f32> = constant::<f32>(0.0, self.dims);  
-        let mut pitch_x: Array<f32> = constant::<f32>(pitch_x_pix, self.dims);  
-        let mut pitch_y: Array<f32> = constant::<f32>(pitch_y_pix, self.dims);  
-        let mut slm_ph = constant::<f32>(0.0, self.dims);
-
+        let mut pitch_x: Array<f32> = constant::<f32>(pitch_x_pix.abs(), self.dims);  
+        let mut pitch_y: Array<f32> = constant::<f32>(pitch_y_pix.abs(), self.dims);  
+        let mut arr_2pi = constant::<f32>(2.0*PI, self.dims);
+    
         let vec_pix_x: Vec<i32> = (1..=img_size_x as i32).collect();
         let vec_pix_y: Vec<i32> = (1..=img_size_y as i32).collect();
         let dims_x = Dim4::new(&[img_size_x, 1, 1, 1]);
@@ -149,13 +189,19 @@ impl SLMConfig {
         
         let k_x = sub(&pix_x, &a_slmc_x, true) * dk;
         let k_y = sub(&pix_y, &a_slmc_y,true) * dk;
-        let k_xy_sq = add(&mul(&k_x, &k_x,true), &mul(&k_y,&k_y,true), true);
+        let k_xy_sq = add(&mul(&k_x, &k_x,true), &mul(&k_y, &k_y, true), true);
         let k_z = sqrt( &sub(&k_tot_sq, &k_xy_sq, true) );
         let phz = z_shift*k_z;
         let phx: Array<f32> = modulo(&pix_x, &pitch_x, true) * 2.0 as f32 * PI / pitch_x_pix;
         let phy: Array<f32> = modulo(&pix_y, &pitch_y, true) * 2.0 as f32 * PI / pitch_y_pix;
-        slm_ph = add(&add(&phx, &phy, true), &phz, true);
-        self.phase_mask = binarize(&slm_ph, self.slm_bitdepth); 
+        
+        let slm_ph = add(&add(&phx, &phy, true), &phz, true);
+        let slm_ph1 = modulo(&slm_ph, &arr_2pi, true);
+        let slm_ph2 = add(&slm_ph1, &arr_2pi, true);
+        let slm_ph_mod2pi = modulo(&slm_ph2, &arr_2pi, true);
+
+        self.phase_mask = binarize(&slm_ph_mod2pi, self.slm_bitdepth); 
+
     }
 }
     

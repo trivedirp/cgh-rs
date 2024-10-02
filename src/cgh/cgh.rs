@@ -78,7 +78,7 @@ impl Cgh {
         let slm_size = (slm_size_x, slm_size_y);
         let slm_bitdepth = 8;
         let slm_path = fl_path.clone();
-        let slm = Arc::new(Mutex::new(SLMConfig::new(slm_size, slm_bitdepth)));
+        let slm = Arc::new(Mutex::new(SLMConfig::new(slm_size, slm_bitdepth, cgh_mode)));
 
         Self {
             thread,
@@ -137,7 +137,7 @@ impl Cgh {
             // fast_galvo_front_peak = 4.0;
             // fast_galvo_side_peak = 10.0;
         } 
-        let spiral_amp = 2.0e-3; //voltage amplitude for spiral galvo 
+        let spiral_amp = 0.0e-3; //voltage amplitude for spiral galvo 
 
         let t0 = period_fast * 0.05;
         let on_laser_s = match bidir_on { 
@@ -284,6 +284,7 @@ impl Cgh {
 
                 let phasemask_filename = slm_path.join("cgh.bin");
                 let tgt_image_filename = slm_path.join("tgt_img.bin");
+                let zmq_server_on = shared_state.cgh_mode == CghMode::CghInplane || shared_state.cgh_mode == CghMode::SpimCalib;
                 for image in rx {
                     let z_stack = shared_state.cgh_mode == CghMode::Stack488 || shared_state.cgh_mode == CghMode::Stack561 || shared_state.cgh_mode == CghMode::Stack2ch || shared_state.cgh_mode == CghMode::CghInplane;
                     let dcam_frame_index = image.frame_index;
@@ -333,15 +334,36 @@ impl Cgh {
                             if shared_state.generate_new_holo.load(Relaxed) {
                                 // slm.lock().unwrap().read_target_img_file(&tgt_image_filename);
                                 // slm.lock().unwrap().calc_gs2d(10);
-                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - (size.0 as f32)/2.0) * (slm.lock().unwrap().slm_size.0 as f32/size.0 as f32) ).floor() as i32;  
-                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - (size.1 as f32)/2.0) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
+                                // let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - (size.0 as f32)/2.0) * (slm.lock().unwrap().slm_size.0 as f32/size.0 as f32) ).floor() as i32;  
+                                // let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - (size.1 as f32)/2.0) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
+                                // let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32) * (slm.lock().unwrap().slm_size.0 as f32/size.0 as f32) ).floor() as i32;  
+                                // let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
+                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/3.0).floor() as i32;  
+                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/3.0).floor() as i32; 
                                 let cghz:i32 = shared_state.shift_3d.load().2;
-                                println!("cghX: {}", cghx);
-                                println!("cghY: {}", cghy);
-                                println!("cghZ: {}", cghz);
+                                println!("cghX: {}", cghy);
+                                println!("cghY: {}", cghx);
+                                println!("Zero ord X: {}", shared_state.cgh_zero_ord.load().0);
+                                println!("Zero ord Y: {}", shared_state.cgh_zero_ord.load().1);
                                 slm.lock().unwrap().calc_superpos3d((cghx, cghy, cghz));
                                 let _ = slm.lock().unwrap().write_phase_mask_file(&phasemask_filename);
                                 shared_state.generate_new_holo.store(false, Relaxed);
+                            }
+                        },
+                        CghMode:: SpimCalib => {
+                            if shared_state.generate_new_holo.load(Relaxed) {
+                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/3.0).floor() as i32;  
+                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/3.0).floor() as i32; 
+                                let cghz:i32 = shared_state.shift_3d.load().2;
+                                println!("cghX: {}", cghy);
+                                println!("cghY: {}", cghx);
+                                println!("Zero ord X: {}", shared_state.cgh_zero_ord.load().0);
+                                println!("Zero ord Y: {}", shared_state.cgh_zero_ord.load().1);
+                                slm.lock().unwrap().calc_superpos3d((cghx, cghy, cghz));
+                                let _ = slm.lock().unwrap().write_phase_mask_file(&phasemask_filename);
+                                shared_state.generate_new_holo.store(false, Relaxed);
+                            } else {
+                                slm.lock().unwrap().send_pong();
                             }
                         },
                         _ => {

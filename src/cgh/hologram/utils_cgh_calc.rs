@@ -42,14 +42,14 @@ pub fn arr_absargtocplx(array_abs:&Array<f32>, array_arg: &Array<f32>) -> Array<
 pub fn binarize(array_arg: &Array<f32>, bitdepth: i32) -> Array<u8> {
     let array_dims = array_arg.dims();
     let n_bins = (2 as i32).pow(bitdepth.try_into().unwrap());
-    let array_disc = add(array_arg, &constant::<f32>(PI, array_dims), false) * (n_bins-1) as f32 / (2.0 as f32*PI); 
+    let array_disc = abs(&array_arg) * (n_bins-1) as f32 / (2.0 as f32*PI); 
     let array_bin = floor(&array_disc).cast::<u8>();
     return array_bin;
 }
 
 pub fn rotate_xy(x: i32,y: i32) -> (i32,i32){
     let xy = array![x as f32, y as f32];
-    let angle: f32 = -0.0 * PI / 180.0;
+    let angle: f32 = 18.0 * PI / 180.0;
     let rotn = array![[f32::cos(angle), -1.0 as f32*f32::sin(angle)], [f32::sin(angle), f32::cos(angle)]];
     let rot_xy = rotn.dot(&xy);
     // println!("\nXY: {}\n", rot_xy);
