@@ -42,3 +42,4 @@ ixxat = { git = "https://github.com/RoLiLab/ixxat-rs.git" }
 ixxat-sys = { git = "https://github.com/RoLiLab/ixxat-rs.git" }
 ndarray = { git = "https://github.com/rust-ndarray/ndarray.git" }
 zmq = { git = "https://github.com/erickt/rust-zmq.git" }
+kinesis = { git = "https://github.com/rahultrivedi14/kinesis-rs.git" }

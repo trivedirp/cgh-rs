@@ -151,7 +151,10 @@ impl CghUI {
                 } 
             }
         }
-        ui.get_foreground_draw_list().add_circle([shared_state.cgh_zero_ord.load().0 as f32+p1[0] as f32, shared_state.cgh_zero_ord.load().1 as f32+p1[1] as f32], 5.0, [0.0, 1.0, 1.0]).thickness(2.0).build();
+        if shared_state.cgh_zero_ord.load().0 > 0 {
+            ui.get_foreground_draw_list().add_circle([shared_state.cgh_zero_ord.load().0 as f32+p1[0] as f32, shared_state.cgh_zero_ord.load().1 as f32+p1[1] as f32], 5.0, [0.0, 1.0, 1.0]).thickness(2.0).build();
+        }
+
         if shared_state.enable_click_cgh.load(Relaxed) {
             let mut mouse_pos = ui.io().mouse_pos;
             if  (mouse_pos[1] + ui.scroll_y()) > p1[1] {
