@@ -2,6 +2,7 @@ use crate::CghMode;
 use crossbeam::atomic::AtomicCell;
 use cust::memory::DeviceBuffer;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16};
+use std::cell::UnsafeCell;
 use std::sync::Arc;
 
 pub struct SharedState {
