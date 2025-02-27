@@ -1,10 +1,13 @@
 use crate::{CghMode, SharedState, CghPositions};
+use std::rc::Rc;
+use crossbeam::atomic::AtomicCell;
 use cust::prelude::*;
+use cust::{memory::DeviceBuffer, stream::Stream};
 use glium::backend::Facade;
 use glium::{glutin, Display};
 use imgui::*;
 use imgui_glium_renderer::Texture;
-use imgui_utils::ImageWidget;
+use imgui_utils::{AnyTexture, CuTextureF32, CuTextureI16, CuTextureU16, CuTextureU16U16, CuTextureU8, CustomRenderer};
 use npp::StreamContext;
 use std::sync::{
     atomic::Ordering::{Relaxed, Release},
@@ -14,19 +17,23 @@ use std::sync::{
 use super::shared_state;
 
 pub struct CghUI {
-    image: ImageWidget,
+    cgh_texture: Rc<CuTextureU16>,
+    id_cgh_texture: TextureId,
     cgh_positions: CghPositions,
+    size: (usize, usize),
+    cgh_stream: Arc<Stream>,
 }
 
 impl CghUI {
-    pub fn new<F>(size: (usize, usize), gl_context: &F, textures: &mut Textures<Texture>, stream: Arc<Stream>, stream_context: StreamContext) -> Self
-    where
-        F: Facade,
-    {
-        let image = ImageWidget::new(size, gl_context, textures, stream.clone(), stream_context).unwrap();
+    pub fn new(size: (usize, usize), cgh_texture: Rc<CuTextureU16>, id_cgh_texture: TextureId, cgh_stream: Arc<Stream>) -> Self {
+        // let v_min = Rc::new(AtomicCell::new(0.0f32));
+        // let v_max = Rc::new(AtomicCell::new(10000.0f32));
         let cgh_positions: CghPositions = CghPositions::new();
-        Self{   image,
+        Self{   cgh_texture,
+                id_cgh_texture,
                 cgh_positions, 
+                size,
+                cgh_stream,
             }
     }
 }
@@ -36,7 +43,8 @@ impl CghUI {
         let v_min = 0.0;
         let mut v_max = shared_state.v_max.load();
         let mut sample_z_target = shared_state.sample_z_manual_target_mm.load();
-        if Slider::new("sample_z", -2.0, 2.0).build(ui, &mut sample_z_target) {
+    
+        if Slider::new(ui, "sample_z", -2.0, 2.0).build(&mut sample_z_target) {
             shared_state.sample_z_manual_target_mm.store(sample_z_target);
         }
         ui.same_line();
@@ -58,7 +66,7 @@ impl CghUI {
         let position_mm = shared_state.sample_z_position_mm.load();
         ui.text(format!("{position_mm:.4} mm"));
 
-        if Slider::new("v_max", 1f32, 65535f32).build(ui, &mut v_max) {
+        if Slider::new(ui, "v_max", 1f32, 65535f32).build(&mut v_max) {
             shared_state.v_max.store(v_max);
         }
         let mut save_divisor = shared_state.save_divisor.load(Relaxed);
@@ -69,7 +77,7 @@ impl CghUI {
         let mut shift_x = shift_3d.0;
         let mut shift_y = shift_3d.1;
         let mut shift_z = shift_3d.2;
-        if Slider::new("cgh_shift_z", -100, 100).build(ui, &mut shift_z) {
+        if Slider::new(ui, "cgh_shift_z", -100, 100).build(&mut shift_z) {
             shared_state.shift_3d.store((shift_x,shift_y,shift_z));
         }
         ui.same_line();
@@ -89,24 +97,24 @@ impl CghUI {
         }
         if shared_state.cgh_mode == CghMode::Ondemand {
             let mut v_max_ao0 = shared_state.ao0.load();
-            if Slider::new("AO0:side_fast", -10f32, 10f32).build(ui, &mut v_max_ao0) {
+            if Slider::new(ui, "AO0:side_fast", -10f32, 10f32).build(&mut v_max_ao0) {
                 shared_state.ao0.store(v_max_ao0);
             }
             let mut v_max_ao1 = shared_state.ao1.load();
-            if Slider::new("AO1:side_slow", -10f32, 10f32).build(ui, &mut v_max_ao1) {
+            if Slider::new(ui, "AO1:side_slow", -10f32, 10f32).build(&mut v_max_ao1) {
                 shared_state.ao1.store(v_max_ao1);
             }
             let mut v_max_ao2 = shared_state.ao2.load();
-            if Slider::new("AO2:spiral_x", -1f32, 1f32).build(ui, &mut v_max_ao2) {
+            if Slider::new(ui, "AO2:spiral_x", -1f32, 1f32).build(&mut v_max_ao2) {
                 shared_state.ao2.store(v_max_ao2);
             }
             let mut v_max_ao3 = shared_state.ao3.load();
-            if Slider::new("AO3:spiral_y", -1f32, 1f32).build(ui, &mut v_max_ao3) {
+            if Slider::new(ui, "AO3:spiral_y", -1f32, 1f32).build(&mut v_max_ao3) {
                 shared_state.ao3.store(v_max_ao3);
             }
         } else if shared_state.cgh_mode == CghMode::SpimCalib {
             let mut v_max_ao1 = shared_state.ao1.load();
-            if Slider::new("AO1:side", -5f32, 5f32).build(ui, &mut v_max_ao1) {
+            if Slider::new(ui, "AO1:side", -5f32, 5f32).build(&mut v_max_ao1) {
                 shared_state.ao1.store(v_max_ao1);
             }
             if ui.button("start_calib") {
@@ -124,7 +132,7 @@ impl CghUI {
             ui.text(format!("No of Datapoints: {}", shared_state.n_datapts.load()));
         } else if shared_state.cgh_mode == CghMode::CghInplane {
             let mut v_max_ao1 = shared_state.ao1.load();
-            if Slider::new("AO1:side", -5f32, 5f32).build(ui, &mut v_max_ao1) {
+            if Slider::new(ui, "AO1:side", -5f32, 5f32).build(&mut v_max_ao1) {
                 shared_state.ao1.store(v_max_ao1);
             }
         } else {
@@ -134,9 +142,13 @@ impl CghUI {
         }
 
         let scale = 1.0;
-        self.image.update_from_gpu_u16(&shared_state.d_roi, v_min, v_max);
         let p1 = ui.cursor_pos();
-        self.image.display(ui, scale);
+        /*let AnyTexture::CuU16(cgh_texture) = renderer.lookup_texture(id_cgh_texture).unwrap() else {
+             unreachable!();
+        }; */
+        self.cgh_texture.update_from_cuda_async(&shared_state.d_roi, &self.cgh_stream);
+        imgui::Image::new(self.id_cgh_texture, [self.size.0 as f32 * scale, self.size.1 as f32 * scale]).build(ui);
+
         if shared_state.save_zero_ord.load(Relaxed) {
             let mut mouse_pos = ui.io().mouse_pos;
             if  (mouse_pos[1] + ui.scroll_y()) > p1[1] {

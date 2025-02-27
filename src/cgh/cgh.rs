@@ -14,6 +14,7 @@ use std::{
     io::Write,
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
+    cell::UnsafeCell,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
         Arc, Mutex,
@@ -32,8 +33,8 @@ pub struct Cgh {
     spim_data: Arc<Mutex<SpimExptData>>,
     pub size: (usize, usize),
     pub shared_state: Arc<SharedState>,
-    pub stream: Arc<Stream>,
-    pub stream_context: StreamContext,
+    // pub stream: Arc<Stream>,
+    // pub stream_context: StreamContext,
     pub data_raw_path: Option<Arc<PathBuf>>,
     sample_z_stage: Arc<PmdDevice>,
     rotatn_stage: Arc<Mutex<KinesisDevice>>,
@@ -43,9 +44,9 @@ pub struct Cgh {
 }
 
 impl Cgh {
-    pub fn new(cgh_mode: CghMode, stream: Arc<Stream>, fl_path: Arc<PathBuf>) -> Self {
+    pub fn new(cgh_mode: CghMode, fl_path: Arc<PathBuf>) -> Self {
         let thread = None;
-        let stream_context = StreamContext::new(&stream);
+        // let stream_context = StreamContext::new(&stream);
         let velocity_mmps = 11.0;
         let acceleration_mmpsps = 600.0;
         let profile = MotionProfile::SCurve;
@@ -94,8 +95,8 @@ impl Cgh {
             spim_data,
             size,
             shared_state,
-            stream,
-            stream_context,
+            // stream,
+            // stream_context,
             data_raw_path: None,
             sample_z_stage,
             rotatn_stage,
@@ -282,7 +283,7 @@ impl Cgh {
         let camera = self.camera.clone();
         let sample_z_stage = self.sample_z_stage.clone();
         let rotatn_stage  = self.rotatn_stage.clone();
-        let stream = self.stream.clone();
+        // let stream = self.stream.clone();
         let fl_filename = self.fl_path.clone().join("fl.bin");
         let spim_data = self.spim_data.clone();
         let size = self.size.clone();
@@ -350,17 +351,22 @@ impl Cgh {
                     let image = Arc::new(image);
                     if image.frame_index % 10 == 0 {
                         // println!("image {}", image.frame_index);
-                        let roi = &image.data;
-                        unsafe {
+                        // let roi = &image.data;
+                        /* unsafe {
                             let d_roi_mut = &mut *(&shared_state.d_roi as *const DeviceBuffer<u16> as *mut DeviceBuffer<u16>);
                             d_roi_mut.async_copy_from(roi, &stream).unwrap()
-                        };
+                        }; 
+                        unsafe {
+                            let d_roi_mut = &mut *(shared_state.d_roi).get();
+                            d_roi_mut.async_copy_from(roi, &stream).unwrap()
+                        }; */
+
                     }
                     // generate SLM control pulse and calculate hologram 
                     match shared_state.cgh_mode {
                         CghMode:: CghInplane => {
                             if image.frame_index % (50*40) == 0 {
-                              rotatn_stage.lock().unwrap().move_rel(1.0);
+                              // rotatn_stage.lock().unwrap().move_rel(5.0);
                             }
                             if shared_state.generate_new_holo.load(Relaxed) {
                                 // slm.lock().unwrap().read_target_img_file(&tgt_image_filename);
