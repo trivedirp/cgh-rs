@@ -37,7 +37,7 @@ pub struct Cgh {
     // pub stream_context: StreamContext,
     pub data_raw_path: Option<Arc<PathBuf>>,
     sample_z_stage: Arc<PmdDevice>,
-    rotatn_stage: Arc<Mutex<KinesisDevice>>,
+    // rotatn_stage: Arc<Mutex<KinesisDevice>>,
     fl_path: Arc<PathBuf>,
     slm: Arc<Mutex<SLMConfig>>,
     slm_path: Arc<PathBuf>,
@@ -51,8 +51,7 @@ impl Cgh {
         let acceleration_mmpsps = 600.0;
         let profile = MotionProfile::SCurve;
         let sample_z_stage = Arc::new(PmdDevice::new(velocity_mmps, acceleration_mmpsps, profile));
-        let rotatn_stage = Arc::new(Mutex::new(KinesisDevice::new("/dev/ttyUSB0", 0x01)));
-        // let daq = Arc::new(XSeriesDevice::new(10, 0).unwrap());
+        // let rotatn_stage = Arc::new(Mutex::new(KinesisDevice::new("/dev/ttyUSB0", 0x01)));
         let daq = Arc::new(XSeriesDevice::default());
         let mut camera = DcamCamera::new(0, None, false, 1000);
         camera.set_trigger_source(dcam::TriggerSource::External);
@@ -99,7 +98,7 @@ impl Cgh {
             // stream_context,
             data_raw_path: None,
             sample_z_stage,
-            rotatn_stage,
+            // rotatn_stage,
             fl_path,
             slm,
             slm_path,
@@ -282,7 +281,7 @@ impl Cgh {
         let shared_state = self.shared_state.clone();
         let camera = self.camera.clone();
         let sample_z_stage = self.sample_z_stage.clone();
-        let rotatn_stage  = self.rotatn_stage.clone();
+        // let rotatn_stage  = self.rotatn_stage.clone();
         // let stream = self.stream.clone();
         let fl_filename = self.fl_path.clone().join("fl.bin");
         let spim_data = self.spim_data.clone();
