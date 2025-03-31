@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::{
     io::{Write, BufWriter},
     fs::File,

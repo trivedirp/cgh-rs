@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use crate::{ao_clk, RampData};
 use std::iter::zip;
 

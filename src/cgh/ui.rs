@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use crate::{CghMode, SharedState, CghPositions};
 use std::rc::Rc;
 use std::time::Instant;
@@ -58,7 +59,7 @@ impl CghUI {
             }
     }
 
-    pub fn run_event_loop(&mut self, shared_state: &SharedState, mut last_frame: Instant) {
+    pub fn run_event_loop(&mut self, shared_state: &SharedState) {
         let title = "cgh";
         let mut event_loop = EventLoop::new();
         let context = glutin::ContextBuilder::new().with_vsync(true);
@@ -89,13 +90,12 @@ impl CghUI {
         
         let mut cgh_texture = CuTextureU16::new(gl_context, self.size, Rc::new(AtomicCell::new(0.0)), cgh_v_max.clone());
         // let cgh_texture = CghTexture::new(gl_context, renderer, self.size, cgh_v_max);
-        // let mut cgh_texture = RefCell::new(CuTextureU16::new(gl_context, self.size, Rc::new(AtomicCell::new(0.0)), cgh_v_max.clone()));
         // let mut cgh_texture = Rc::new(CuTextureU16::new(gl_context, self.size, Rc::new(AtomicCell::new(0.0)), cgh_v_max.clone()));
         // let mut cgh_texture: Rc<RefCell<CuTextureU16>> = Rc::new(RefCell::new(CuTextureU16::new(gl_context, self.size, Rc::new(AtomicCell::new(0.0)), cgh_v_max.clone())));
         let textures = renderer.textures();
         let id_cgh_texture: TextureId = textures.insert(AnyTexture::CuU16(cgh_texture));
         // let mut cgh_texture_c = cgh_texture.clone();
-
+        let mut last_frame: Instant = Instant::now();
         event_loop.run_return(move |event, _, control_flow| match event {
             Event::NewEvents(_) => {
                 let now = Instant::now();
@@ -108,6 +108,7 @@ impl CghUI {
                 gl_window.window().request_redraw();
             }
             Event::RedrawRequested(_) => {
+                // println!("rerdraw req...");
                 let ui = imgui.frame();
                 let size = display.gl_window().window().inner_size();
                 let size = [size.width as f32 / hidpi_factor, size.height as f32 / hidpi_factor];
@@ -116,8 +117,12 @@ impl CghUI {
                     let v_min = 0.0;
                     let mut v_max = shared_state.v_max.load();
                     let mut sample_z_target = shared_state.sample_z_manual_target_mm.load();
-                
-                    if Slider::new(ui, "sample_z", -2.0, 2.0).build(&mut sample_z_target) {
+                    // let mut laser_2p_power = shared_state.laser_2p_power.load();
+                    
+                    /*if Slider::new(ui, "2P_laser_mW", 0.0, 2000.0).build(&mut laser_2p_power) {
+                        shared_state.laser_2p_power.store(laser_2p_power);
+                    }*/
+                    if Slider::new(ui, "Sample_Z_mm", -2.0, 2.0).build(&mut sample_z_target) {
                         shared_state.sample_z_manual_target_mm.store(sample_z_target);
                     }
                     ui.same_line();
@@ -132,13 +137,13 @@ impl CghUI {
                     if ui.button("On") {
                         shared_state.sample_z_on.store(true, Relaxed);
                     }
-                    ui.same_line();
+                    /* ui.same_line();
                     let event_status = shared_state.sample_z_event_status.load(Relaxed);
                     ui.text(format!("{event_status:#010b}"));
                     ui.same_line();
                     let position_mm = shared_state.sample_z_position_mm.load();
                     ui.text(format!("{position_mm:.4} mm"));
-            
+                    */
                     if Slider::new(ui, "v_max", 1f32, 65535f32).build(&mut v_max) {
                         shared_state.v_max.store(v_max);
                     }
@@ -157,7 +162,8 @@ impl CghUI {
                     if ui.button("save_zero_ord") {
                         shared_state.save_zero_ord.store(true, Release);
                     }
-                    ui.same_line();if ui.button("enable_click_cgh") {
+                    ui.same_line();
+                    if ui.button("enable_click_cgh") {
                         shared_state.enable_click_cgh.store(true, Release);
                     }
                     ui.same_line();
@@ -165,9 +171,6 @@ impl CghUI {
                         shared_state.enable_click_cgh.store(false, Release);
                     }
             
-                    if ui.button("save curr_image") {
-                        shared_state.save_img.store(true, Release);
-                    }
                     if shared_state.cgh_mode == CghMode::Ondemand {
                         let mut v_max_ao0 = shared_state.ao0.load();
                         if Slider::new(ui, "AO0:side_fast", -10f32, 10f32).build(&mut v_max_ao0) {
@@ -212,6 +215,13 @@ impl CghUI {
                         if ui.button("save_expt_params") {
                             shared_state.save_expt.store(true, Release);
                         }
+                    }
+                    if ui.button("save curr_image") {
+                        shared_state.save_img.store(true, Release);
+                    }
+                    ui.same_line();
+                    if ui.button("start_save_expt") {
+                        shared_state.experiment_save_start.store(true, Release);
                     }
             
                     let scale = 1.0;

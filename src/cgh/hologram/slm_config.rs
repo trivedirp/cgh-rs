@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::{
     convert::Into, fs::File, io::{BufReader, BufWriter, Read, Result, Write}, panic::{self, AssertUnwindSafe}, path::PathBuf, sync::{
         atomic::{AtomicBool, Ordering::Relaxed},Arc, Mutex, 

@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use crate::{ao_clk, SpiralData};
 use std::iter::zip;
 use std::f64::consts::PI;
