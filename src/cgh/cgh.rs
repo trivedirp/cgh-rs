@@ -1,6 +1,6 @@
 #![allow(warnings)]
 
-use crate::{cgh::shared_state, CghMode, ConstDigital, DigitalScheduler, LivePulseTrain, Pulse, PulseData, PulseTrain, Ramp, RampData, SLMConfig, SharedState, SpimCalibration, SpimExptData, Spiral, SpiralData, StepRamp, StepRampData, AO_SAMPLE_CLK, DO_SAMPLE_CLK};
+use crate::{cgh::shared_state, CghMode, DigitalSource, ConstDigital, DigitalOr, DigitalScheduler, LivePulseTrain, Pulse, PulseData, PulseTrain, Ramp, RampData, SLMConfig, SharedState, SpimCalibration, SpimExptData, Spiral, SpiralData, StepRamp, StepRampData, AO_SAMPLE_CLK, DO_SAMPLE_CLK};
 use async_writer::AsyncWriter;
 use data::{data_raw_timestamp, new_data_raw_path, new_timestamp};
 use cust::{memory::*, prelude::DeviceBuffer, DeviceCopy, stream::Stream};
@@ -139,7 +139,7 @@ impl Cgh {
         let pulse_period = 100e-3;
         let pulse_env_period = 2.0;
         // let pulse_env: (f64, f64, f64, f64) = (0.0, 1.0, 1.0, 1.0);
-        let pulse_env:f64 = 1.0;
+        let pulse_env_duration:f64 = 1.0;
 
         let pulse_561_duration = 0.8*period_fast;
         let pulse_561_period = 2.0 * period_fast;
@@ -459,15 +459,21 @@ impl Cgh {
                                 let z_sweep_f32 = dcam_frame_index as f32 / inplane_slices as f32;
                                 shared_state.future_frame_index.store(Some(z_sweep_f32.ceil() as u64 * inplane_slices as u64));
                                 let pulse_train_start_time = shared_state.future_frame_index.load().unwrap() as f64 * period_fast_plane;
-                                // spirit_pulsepick.lock().unwrap().update_pulse(shared_state.experiment_save_start.load(Relaxed));
-                            
-                                scheduler.lock().unwrap().schedule(pulse_train_start_time, 
-                                                            LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: pulse_duration, offset_s: t0 }, 
-                                                                                                        pulse_duration_train, 
-                                                                                                        pulse_env, 
-                                                                                                        pulse_env_period,
-                                                                                                        shared_state.future_frame_index.load().unwrap() as usize)); // schedule pulse 
-                                                                                                        
+                                let pulsetrain_10ms = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                                                        pulse_env_duration, 
+                                                                        3.0*pulse_env_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize);
+                                let pulsetrain_20ms = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0 + 1.0*pulse_env_period }, 
+                                                                        pulse_env_duration, 
+                                                                        3.0*pulse_env_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize);
+                                let pulsetrain_50ms = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0 + 2.0*pulse_env_period }, 
+                                                                        pulse_env_duration, 
+                                                                        3.0*pulse_env_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize);
+                                let sources = [pulsetrain_10ms, pulsetrain_20ms, pulsetrain_50ms];
+                                let mut pulse = DigitalOr { sources };
+                                scheduler.lock().unwrap().schedule(pulse_train_start_time, pulse);                                                                         
                             }
                         }
                     }
