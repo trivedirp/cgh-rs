@@ -117,11 +117,11 @@ impl CghUI {
                     let v_min = 0.0;
                     let mut v_max = shared_state.v_max.load();
                     let mut sample_z_target = shared_state.sample_z_manual_target_mm.load();
-                    // let mut laser_2p_power = shared_state.laser_2p_power.load();
+                    let mut rotatn_stage_deg = shared_state.rotatn_stage_deg.load();
                     
-                    /*if Slider::new(ui, "2P_laser_mW", 0.0, 2000.0).build(&mut laser_2p_power) {
-                        shared_state.laser_2p_power.store(laser_2p_power);
-                    }*/
+                    if Slider::new(ui, "rotation_stage_deg", -10.0, 10.0).build(&mut rotatn_stage_deg) {
+                        shared_state.rotatn_stage_deg.store(rotatn_stage_deg);
+                    }
                     if Slider::new(ui, "Sample_Z_mm", -2.0, 2.0).build(&mut sample_z_target) {
                         shared_state.sample_z_manual_target_mm.store(sample_z_target);
                     }
@@ -247,7 +247,7 @@ impl CghUI {
                         }
                     }
                     if shared_state.cgh_zero_ord.load().0 > 0 {
-                        ui.get_foreground_draw_list().add_circle([shared_state.cgh_zero_ord.load().0 as f32+p1[0] as f32, shared_state.cgh_zero_ord.load().1 as f32+p1[1] as f32], 5.0, [0.0, 1.0, 1.0]).thickness(2.0).build();
+                        ui.get_foreground_draw_list().add_circle([shared_state.cgh_zero_ord.load().0 as f32+p1[0] as f32, shared_state.cgh_zero_ord.load().1 as f32+p1[1] as f32], 8.0, [0.0, 1.0, 1.0]).thickness(2.0).build();
                     }
             
                     if shared_state.enable_click_cgh.load(Relaxed) {

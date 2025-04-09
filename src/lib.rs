@@ -8,8 +8,9 @@ mod tests {
     use crate::{Pulse, PulseData};
     #[test]
     fn test_chunk() {
-        let data = PulseData { period_s: 10.0, on_s: 1.0, offset_s: 0.0 };
-        let pulse = Pulse::new(data);
+        let data = PulseData { period_s: 1.0, on_s: 10.0e-3, offset_s: 0.0 };
+        // let pulse = Pulse::new(data);
+        let mut pulse = LivePulseTrain::new(data, 1.0, 6.0, 0);
         let n_samples = 100_000_000;
         let samples_per_write = 20_000;
         assert_eq!(n_samples % samples_per_write, 0);
