@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use zmq::{Context, Socket, Message, Error};
 use std::io::{self, Write};
 use std::thread::*;

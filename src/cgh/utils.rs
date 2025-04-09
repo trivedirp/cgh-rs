@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::{
     io::Write,
     panic::{self, AssertUnwindSafe},
@@ -8,7 +9,7 @@ use std::{
     },
 };
 use hdf5::{File, H5Type, Result};
-use ndarray::{arr1, Array1, ArrayView};
+use ndarray::{array, arr1, Array1, ArrayView};
 
 pub fn vectoarr(v:&Vec<f32>) -> [f32; 9] {
     let s = v.as_slice();
@@ -101,16 +102,17 @@ impl SpimExptData {
         file.close().unwrap();
         Ok(())
     }
-    pub fn create_expt_params_file(&self, z_start_mm: f64, z_end_mm: f64, z_step_mm: f64, period_fast: f64, pulse_on_times: &Vec<f64>) -> Result<()> {
+    pub fn create_expt_params_file(&self, z_start_mm: f64, z_end_mm: f64, z_step_mm: f64, period_fast: f64, pulse_on_times: (f64,f64,f64,f64)) -> Result<()> {
         let file = File::create("/data/rahul/data/spim_calib_data/expt_parsms.h5").unwrap(); 
         let ds_z_start_mm = file.new_dataset::<f64>().shape([1]).create("z_start_mm").unwrap();
         let ds_z_end_mm = file.new_dataset::<f64>().shape([1]).create("z_end_mm").unwrap();
         let ds_z_step_mm = file.new_dataset::<f64>().shape([1]).create("z_step_mm").unwrap();
-        let ds_led_pulse_train = file.new_dataset::<f64>().shape([pulse_on_times.len()]).create("led_pulse_train").unwrap();
+        let pulse_on_times_len = 4;
+        let ds_led_pulse_train = file.new_dataset::<f64>().shape([pulse_on_times_len]).create("led_pulse_train").unwrap();
         ds_z_start_mm.write_scalar(&z_start_mm).unwrap();
         ds_z_end_mm.write_scalar(&z_end_mm).unwrap();
         ds_z_step_mm.write_scalar(&z_step_mm).unwrap();
-        ds_led_pulse_train.write(&pulse_on_times).unwrap();
+        ds_led_pulse_train.write(&vec![pulse_on_times.0, pulse_on_times.1, pulse_on_times.2, pulse_on_times.3]).unwrap();
         file.close().unwrap();
         Ok(())
     }

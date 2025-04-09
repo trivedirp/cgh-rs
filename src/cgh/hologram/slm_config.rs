@@ -1,3 +1,4 @@
+#![allow(warnings)]
 use std::{
     convert::Into, fs::File, io::{BufReader, BufWriter, Read, Result, Write}, panic::{self, AssertUnwindSafe}, path::PathBuf, sync::{
         atomic::{AtomicBool, Ordering::Relaxed},Arc, Mutex, 
@@ -20,9 +21,9 @@ pub struct SLMConfig {
 
 impl SLMConfig {
     pub fn new(slm_size: (u64, u64), slm_bitdepth: i32, cgh_mode: CghMode) -> Self {
-        // let server_on = cgh_mode == CghMode::CghInplane || cgh_mode == CghMode::SpimCalib;
+        let server_on = cgh_mode == CghMode::CghInplane || cgh_mode == CghMode::SpimCalib;
         // let server_on = cgh_mode == CghMode::CghInplane;
-        let server_on = false;
+        // let server_on = false;
         Self { slm_size,
             slm_bitdepth,
             dims: Dim4::new(&[slm_size.0, slm_size.1, 1, 1]),

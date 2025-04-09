@@ -2,12 +2,12 @@ use crate::CghMode;
 use crossbeam::atomic::AtomicCell;
 use cust::memory::DeviceBuffer;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16};
-use std::cell::UnsafeCell;
 use std::sync::Arc;
 
 pub struct SharedState {
     pub cgh_mode: CghMode,
     // pub zstage_msg: ZStageMessage,
+    pub future_frame_index: AtomicCell<Option<u64>>,
     pub start_save: AtomicBool,
     pub save: AtomicBool,
     pub stop_save: AtomicBool,
@@ -33,17 +33,20 @@ pub struct SharedState {
     pub sample_z_manual_target_mm: AtomicCell<f32>,
     pub sample_z_event_status: AtomicU16,
     pub sample_z_position_mm: AtomicCell<f32>,
+    pub rotatn_stage_deg: AtomicCell<f32>,
     pub shift_3d: AtomicCell<(i32,i32,i32)>,
     pub cgh_zero_ord: AtomicCell<(i32,i32)>,
     pub save_zero_ord: AtomicBool,
     pub enable_click_cgh: AtomicBool,
     pub generate_new_holo: AtomicBool,
+    pub experiment_save_start: AtomicBool,
 }
 
 impl SharedState {
     pub fn new(cgh_mode: CghMode, size: (usize, usize)) -> SharedState {
         let shared_state = SharedState {
             cgh_mode,
+            future_frame_index: AtomicCell::new(None),
             start_save: AtomicBool::new(false),
             save: AtomicBool::new(false),
             stop_save: AtomicBool::new(false),
@@ -68,12 +71,14 @@ impl SharedState {
             sample_z_off: AtomicBool::new(false),
             sample_z_position_mm: AtomicCell::new(0f32),
             sample_z_manual_target_mm: AtomicCell::new(0.0f32),
+            rotatn_stage_deg: AtomicCell::new(0.0f32),
             sample_z_event_status: AtomicU16::new(0u16),
             shift_3d: AtomicCell::new((0,0,0)),
             cgh_zero_ord: AtomicCell::new((0,0)),
             save_zero_ord: AtomicBool::new(false),
             enable_click_cgh: AtomicBool::new(false),
             generate_new_holo: AtomicBool::new(false),
+            experiment_save_start: AtomicBool::new(false),
         };
         shared_state
     }

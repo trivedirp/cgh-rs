@@ -1,7 +1,9 @@
-use crate::{Pulse, PulseTrain, PulseData, Ramp, RampData, Spiral, SpiralData, CghMode, SLMConfig,
-    SharedState, StepRamp, StepRampData, SpimCalibration, SpimExptData, AO_SAMPLE_CLK, DO_SAMPLE_CLK};
+#![allow(warnings)]
+
+use crate::{cgh::shared_state, CghMode, DigitalSource, ConstDigital, DigitalOr, DigitalScheduler, LivePulseTrain, Pulse, PulseData, PulseTrain, Ramp, RampData, SLMConfig, SharedState, SpimCalibration, SpimExptData, Spiral, SpiralData, StepRamp, StepRampData, AO_SAMPLE_CLK, DO_SAMPLE_CLK};
 use async_writer::AsyncWriter;
-use cust::{memory::AsyncCopyDestination, prelude::DeviceBuffer, stream::Stream};
+use data::{data_raw_timestamp, new_data_raw_path, new_timestamp};
+use cust::{memory::*, prelude::DeviceBuffer, DeviceCopy, stream::Stream};
 use dcam::DcamCamera;
 use kinesis::KinesisDevice;
 use ixxat::{PmdDevice, MotionProfile};
@@ -15,6 +17,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
     cell::UnsafeCell,
+    borrow::BorrowMut,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
         Arc, Mutex,
@@ -33,18 +36,18 @@ pub struct Cgh {
     spim_data: Arc<Mutex<SpimExptData>>,
     pub size: (usize, usize),
     pub shared_state: Arc<SharedState>,
-    // pub stream: Arc<Stream>,
+    pub stream: Arc<Stream>,
     // pub stream_context: StreamContext,
     pub data_raw_path: Option<Arc<PathBuf>>,
     sample_z_stage: Arc<PmdDevice>,
     rotatn_stage: Arc<Mutex<KinesisDevice>>,
     fl_path: Arc<PathBuf>,
+    // fl_path: Arc<Option<PathBuf>>,
     slm: Arc<Mutex<SLMConfig>>,
-    slm_path: Arc<PathBuf>,
 }
 
 impl Cgh {
-    pub fn new(cgh_mode: CghMode, fl_path: Arc<PathBuf>) -> Self {
+    pub fn new(cgh_mode: CghMode, stream: Arc<Stream>) -> Self {
         let thread = None;
         // let stream_context = StreamContext::new(&stream);
         let velocity_mmps = 11.0;
@@ -52,7 +55,6 @@ impl Cgh {
         let profile = MotionProfile::SCurve;
         let sample_z_stage = Arc::new(PmdDevice::new(velocity_mmps, acceleration_mmpsps, profile));
         let rotatn_stage = Arc::new(Mutex::new(KinesisDevice::new("/dev/ttyUSB0", 0x01)));
-        // let daq = Arc::new(XSeriesDevice::new(10, 0).unwrap());
         let daq = Arc::new(XSeriesDevice::default());
         let mut camera = DcamCamera::new(0, None, false, 1000);
         camera.set_trigger_source(dcam::TriggerSource::External);
@@ -60,15 +62,15 @@ impl Cgh {
         // camera.set_trigger_active(dcam::TriggerActive::Edge);
         camera.set_trigger_polarity(dcam::TriggerPolarity::Positive);
         camera.set_binning(2);
-        // camera.set_exposure(0.00072);
-        camera.set_exposure(0.00144);
-        // camera.set_exposure(0.00598);
+        // camera.set_exposure(0.00144);
+        camera.set_exposure(0.00398);
         // camera.set_trigger_global_exposure(dcam::TriggerGlobalExposure::GlobalReset);  
         
         camera.properties.set_width(1024 * 2);
         camera.properties.set_height(512 * 2);
         camera.properties.set_offset_x(512 * 2);
         camera.properties.set_offset_y(256 * 2);
+        println!("New dimensions ({} x {})", camera.width(), camera.height());
         
         let calibration_side_488 = SpimCalibration::new(0.0, 0.0);
         let calibration_side_561 = SpimCalibration::new(0.0, 0.0);
@@ -81,8 +83,17 @@ impl Cgh {
         let slm_size_y = 1152;
         let slm_size = (slm_size_x, slm_size_y);
         let slm_bitdepth = 8;
-        let slm_path = fl_path.clone();
+
+        let timestamp = new_timestamp();
+    
+        // let fl_path = if cgh_mode != CghMode::Ondemand { Arc::new(Some(data_raw_timestamp("/data", true, &timestamp))) } else { Arc::new(None) };
+        // let fl_path = Arc::new(Some(data_raw_timestamp("/data", true, &timestamp)));
+        let fl_path = Arc::new(data_raw_timestamp("/data", true, &timestamp));
+       
         let slm = Arc::new(Mutex::new(SLMConfig::new(slm_size, slm_bitdepth, cgh_mode)));
+        if cgh_mode == CghMode::Stack488  || cgh_mode == CghMode::Stack561 || cgh_mode == CghMode::Stack2ch || cgh_mode == CghMode::Ondemand {
+            shared_state.future_frame_index.store(Some(0));
+        }
 
         Self {
             thread,
@@ -95,14 +106,13 @@ impl Cgh {
             spim_data,
             size,
             shared_state,
-            // stream,
+            stream,
             // stream_context,
             data_raw_path: None,
             sample_z_stage,
             rotatn_stage,
             fl_path,
             slm,
-            slm_path,
         }
     }
     pub fn start(&mut self, gpu_index: i32, stop: Arc<AtomicBool>, thread_panic: Arc<AtomicBool>) {
@@ -113,26 +123,28 @@ impl Cgh {
 
         let stack_mode = self.shared_state.cgh_mode == CghMode::Stack488 || self.shared_state.cgh_mode == CghMode::Stack561 || self.shared_state.cgh_mode == CghMode::Stack2ch;
         let z_start_mm: f64 = if stack_mode {150.0e-3} else {0.0e-3};
-        let z_end_mm: f64 = if stack_mode {-150.0e-3} else {-0.1e-3};
+        let z_end_mm: f64 = if stack_mode {-150.0e-3} else {0.0e-3};
         
         let period_fast_3d = 20.0e-3;
-        let period_fast_plane = 20.0e-3;
+        let period_fast_plane: f64 = 20.0e-3;
         let period_spiral = 1.0e-3;
         let period_slm = 100.0e-3;        
     
         let bidir_on = false;
         let period_fast = if self.shared_state.cgh_mode == CghMode::CghInplane {period_fast_plane} else {period_fast_3d};
         
-        let pulse_duration = 10.0e-3; // 10.0e-3, 20.0e-3, 50.0e-3
-        let pulse_duration_train: Vec<f64> = vec![10.0e-3, 20.0e-3, 50.0e-3] ; // 10.0e-3, 20.0e-3, 50.0e-3
+        let pulse_duration = 10.0e-3; 
+        // let pulse_duration_train: Vec<f64> = vec![10.0e-3, 20.0e-3, 50.0e-3] ; // 10.0e-3, 20.0e-3, 50.0e-3
+        let pulse_duration_train = (10.0e-3, 20.0e-3, 50.0e-3) ; // 10.0e-3, 20.0e-3, 50.0e-3
         let pulse_period = 100e-3;
-        let pulse_env_period = 10.0;
-        let pulse_env: Vec<f64> = vec![0.0, 1.0, 1.0, 1.0];
+        let pulse_env_period = 4.0;
+        // let pulse_env: (f64, f64, f64, f64) = (0.0, 1.0, 1.0, 1.0);
+        let pulse_env_duration:f64 = 1.0;
 
         let pulse_561_duration = 0.8*period_fast;
         let pulse_561_period = 2.0 * period_fast;
         let pulse_env_561_period = 10.0;
-        let mut pulse_561_env: Vec<f64> = vec![0.0, 500e-3, 1.0];
+        let mut pulse_561_env = 1.0;
 
         let steptime_slow_galvo = match self.shared_state.cgh_mode {
             // CghMode::CghInplane => n_pulses as f64*pulse_period,
@@ -147,7 +159,7 @@ impl Cgh {
             // fast_galvo_front_peak = 4.0;
             // fast_galvo_side_peak = 10.0;
         } 
-        let spiral_amp = 5.0e-3; //voltage amplitude for spiral galvo 
+        let spiral_amp = 0.0e-3; //voltage amplitude for spiral galvo 
 
         let t0 = period_fast * 0.05;
         let on_laser_s = match bidir_on { 
@@ -168,10 +180,12 @@ impl Cgh {
         let spiral_galvo_x = Spiral::new(SpiralData { period_s: period_spiral, offset_s: t0, start_volts: -1.0*spiral_amp, end_volts: spiral_amp, sine_on: true });
         let spiral_galvo_y = Spiral::new(SpiralData { period_s: period_spiral, offset_s: t0, start_volts: -1.0*spiral_amp, end_volts: spiral_amp, sine_on: false });
 
-        let z_step_mm = -1.0e-3;
-        assert!(z_end_mm < z_start_mm);
+        let z_step_mm = if stack_mode{-1.0e-3} else {0.0e-3};
+        assert!(z_end_mm <= z_start_mm);
         let z_span_mm = z_end_mm - z_start_mm;
-        let n_slices = (z_span_mm / z_step_mm).ceil() as usize;
+        let n_slices = if stack_mode {(z_span_mm / z_step_mm).ceil() as usize} else {1};
+        let inplane_slices = (pulse_env_period/period_fast_plane).ceil() as usize;
+        let inplane_slice_check = (inplane_slices as f32 * 0.5).round() as usize;
         let z_span_mm = (n_slices - 1) as f64 * z_step_mm;
         let z_end_mm = z_start_mm + z_span_mm;
         let z_561_488_offset_mm = -0.0;
@@ -225,26 +239,32 @@ impl Cgh {
         };
         let obis_488 = Pulse::new(PulseData { period_s: laser_period_488, on_s: on_488_s, offset_s: offset_488 });
         // let obis_561 = Pulse::new(PulseData { period_s: laser_period_561, on_s: on_561_s, offset_s: offset_561 });
-        let obis_561 = match self.shared_state.cgh_mode { 
+        let mut obis_561 = match self.shared_state.cgh_mode { 
             // CghMode::Stack561 => ,
-            CghMode::CghInplane => PulseTrain::new(PulseData { period_s: pulse_561_period, on_s: pulse_561_duration, offset_s: t0 }, pulse_duration_train.clone(),  pulse_561_env.clone(), pulse_env_561_period),
-            CghMode::SpimCalib => PulseTrain::new(PulseData { period_s: pulse_561_period, on_s: pulse_561_duration, offset_s: t0 }, pulse_duration_train.clone(),  pulse_561_env.clone(), pulse_env_561_period),
-            _ => PulseTrain::new(PulseData { period_s: laser_period_561, on_s: on_561_s, offset_s: offset_561 }, vec![on_561_s], vec![laser_period_561], laser_period_561),
+            CghMode::CghInplane => LivePulseTrain::new(PulseData { period_s: pulse_561_period, on_s: pulse_561_duration, offset_s: t0 },  pulse_561_env, pulse_env_561_period, 0, 0.0),
+            CghMode::SpimCalib => LivePulseTrain::new(PulseData { period_s: pulse_561_period, on_s: pulse_561_duration, offset_s: t0 }, pulse_561_env, pulse_env_561_period, 0, 0.0),
+            _ => LivePulseTrain::new(PulseData { period_s: laser_period_561, on_s: on_561_s, offset_s: offset_561 }, laser_period_561, laser_period_561, 0, 0.0),
         };
         let slm_trig = Pulse::new(PulseData { period_s: period_slm, on_s: 1e-3, offset_s: t0 - 100e-6 });
-        let spirit_pulsepick = PulseTrain::new(PulseData { period_s: pulse_period, on_s: pulse_duration, offset_s: t0 }, pulse_duration_train.clone(), pulse_env.clone(), pulse_env_period); 
+        // let spirit_pulsepick = LivePulseTrain::new(PulseData { period_s: pulse_period, on_s: pulse_duration, offset_s: t0 }, (0.0, 0.0, 0.0), 0.0, pulse_env_period); 
+        // let spirit_pulsepick = Arc::new(Mutex::new(LivePulseTrain::new(PulseData { period_s: pulse_period, on_s: pulse_duration, offset_s: t0 }, pulse_duration_train, pulse_env, pulse_env_period, false) )); 
+        // let spirit_pulsepick2 = spirit_pulsepick.clone();
         let spim_camera = Pulse::new(PulseData { period_s: period_fast, on_s: period_fast / 5.0, offset_s: t0 - 40e-6 }); // trigger delay is 28.8-36 us, use 40 us to be safe
+        // let scheduler = Arc::new(Mutex::new(DigitalScheduler::new(spirit_pulsepick)));
+        let scheduler = Arc::new(Mutex::new(DigitalScheduler::new(ConstDigital::new(false))));
 
         self.daq.DO().add_streaming_line(0, move |data, i| obis_488.chunk(data, i));
         self.daq.DO().add_streaming_line(1, move |data, i| obis_561.chunk(data, i));
-        self.daq.DO().add_streaming_line(4, move |data, i| spirit_pulsepick.chunk(data, i));
+        // self.daq.DO().add_streaming_line(4, move |data, i| spirit_pulsepick2.lock().unwrap().chunk(data, i));
         self.daq.DO().add_streaming_line(2, move |data, i| slm_trig.chunk(data, i));
         self.daq.DO().add_streaming_line(3, move |data, i| spim_camera.chunk(data, i));
-        
+        self.daq.DO().add_streaming_line(4, {
+            let scheduler = scheduler.clone();
+            move |data, i| scheduler.lock().unwrap().chunk(data, i)
+        });
         match self.shared_state.cgh_mode { 
             CghMode::CghInplane => {
                 self.daq.AO().add_streaming_channel(0, move |data, i| fast_galvo_side.chunk(data, i));
-                // self.daq.AO().add_streaming_channel(1, move |data, i| slow_galvo_side_488.chunk(data, i));
                 self.daq.AO().add_streaming_channel(2, move |data, i| spiral_galvo_x.chunk(data, i));
                 self.daq.AO().add_streaming_channel(3, move |data, i| spiral_galvo_y.chunk(data, i));
             },
@@ -283,13 +303,16 @@ impl Cgh {
         let camera = self.camera.clone();
         let sample_z_stage = self.sample_z_stage.clone();
         let rotatn_stage  = self.rotatn_stage.clone();
-        // let stream = self.stream.clone();
-        let fl_filename = self.fl_path.clone().join("fl.bin");
+        let stream = self.stream.clone();
         let spim_data = self.spim_data.clone();
         let size = self.size.clone();
         let slm = self.slm.clone();
-        let slm_path = self.slm_path.clone();        
+        let fl_path = self.fl_path.clone();  
         let n_buffers = 3;
+        let mut total_deg_move = 0.0;
+       
+        // let fl_filename =  if self.shared_state.cgh_mode != CghMode::Ondemand { self.fl_path.clone().unwrap().join("fl.bin")} else {PathBuf::from("")};
+        let fl_filename =  fl_path.join("fl.bin");
         let mut fl_writer = AsyncWriter::new(fl_filename, n_buffers).unwrap();
 
         self.thread = Some(spawn(move || {
@@ -299,75 +322,62 @@ impl Cgh {
                 unsafe {
                     cudaSetDevice(gpu_index);
                 }
-                if shared_state.cgh_mode == CghMode::Stack488 || shared_state.cgh_mode == CghMode::Stack561 || shared_state.cgh_mode == CghMode::Stack2ch {
+                let rx = camera.lock().unwrap().start(thread_panic.clone(), shared_state.frame_rate.clone());
+                if stack_mode {
                     sample_z_stage.move_abs_sync(z_start_mm as f32);
                 }
-                let rx = camera.lock().unwrap().start(thread_panic.clone(), shared_state.frame_rate.clone());
                 if shared_state.cgh_mode != CghMode::Ondemand {
                     println!("Starting AO");
                     aout.start_as_follower(true);
                 }
                 dout.start();
 
-                let phasemask_filename = slm_path.join("cgh.bin");
-                let tgt_image_filename = slm_path.join("tgt_img.bin");
+                let phasemask_filename = fl_path.join("cgh.bin");
+                let tgt_image_filename = fl_path.join("tgt_img.bin");
                 let zmq_server_on = shared_state.cgh_mode == CghMode::CghInplane || shared_state.cgh_mode == CghMode::SpimCalib;
-                for image in rx {
-                    let z_stack = shared_state.cgh_mode == CghMode::Stack488 || shared_state.cgh_mode == CghMode::Stack561 || shared_state.cgh_mode == CghMode::Stack2ch;
-                    let write_img = z_stack || shared_state.cgh_mode == CghMode::CghInplane;
+                let mut rotatn_stage_deg = shared_state.rotatn_stage_deg.load();
+                let write_img_mode = stack_mode || shared_state.cgh_mode == CghMode::CghInplane;
 
+                for image in rx {
+                    // let z_stack = shared_state.cgh_mode == CghMode::Stack488 || shared_state.cgh_mode == CghMode::Stack561 || shared_state.cgh_mode == CghMode::Stack2ch;
                     let dcam_frame_index = image.frame_index;
+
                     let sweep_index = dcam_frame_index as usize / n_slices;
                     let slice_index = match shared_state.cgh_mode {
-                        // CghMode::CghInplane => (dcam_frame_index as usize / (n_pulses as f64*pulse_period/period_fast) as usize) as usize % n_slices,
                         CghMode::Stack2ch => (dcam_frame_index as usize / 2 as usize) % n_slices,
                         _ => dcam_frame_index as usize % n_slices
                     };
+                    // let inplane_slice_index = dcam_frame_index as usize % inplane_slices;
+                    let inplane_slice_index = dcam_frame_index as usize % (6*inplane_slices);
+
                     if shared_state.sample_z_home.load(Relaxed) { 
                         sample_z_stage.home();
+                        rotatn_stage.lock().unwrap().home();
+                        println!("homing stages complete");
                         shared_state.sample_z_home.store(false, Relaxed);
                     }
-                    let z_target_mm = if z_stack { (z_start_mm + slice_index as f64 * z_step_mm) as f32 } else { shared_state.sample_z_manual_target_mm.load() }; 
-                    
-                    match shared_state.cgh_mode {
-                        CghMode::CghInplane => {
-                            if image.frame_index % 20 == 0 {
-                                sample_z_stage.move_abs_fast(z_target_mm);
-                                shared_state.sample_z_position_mm.store(sample_z_stage.actual_position());
-                            }
-                        },
-                        CghMode::Stack2ch => {
-                            if image.frame_index % 2 == 0 {
-                                sample_z_stage.move_abs_fast(z_target_mm);
-                                shared_state.sample_z_position_mm.store(sample_z_stage.actual_position());
-                            }
-                        },
-                        _ => {
-                            sample_z_stage.move_abs_fast(z_target_mm);
-                            shared_state.sample_z_position_mm.store(sample_z_stage.actual_position()); 
-                        }
-                    };
+                    let z_target_mm = if stack_mode { (z_start_mm + slice_index as f64 * z_step_mm) as f32 } else { shared_state.sample_z_manual_target_mm.load() }; 
 
                     let image = Arc::new(image);
-                    if image.frame_index % 10 == 0 {
-                        // println!("image {}", image.frame_index);
-                        // let roi = &image.data;
-                        /* unsafe {
-                            let d_roi_mut = &mut *(&shared_state.d_roi as *const DeviceBuffer<u16> as *mut DeviceBuffer<u16>);
-                            d_roi_mut.async_copy_from(roi, &stream).unwrap()
-                        }; 
-                        unsafe {
-                            let d_roi_mut = &mut *(shared_state.d_roi).get();
-                            d_roi_mut.async_copy_from(roi, &stream).unwrap()
-                        }; */
-
+                    if dcam_frame_index % 20 == 0 {
+                        // println!("image {}", dcam_frame_index);
+                        unsafe{ 
+                        let d_roi_mut = &mut shared_state.d_roi.clone();
+                        // d_roi_mut.copy_from(&image.data).unwrap();
+                        d_roi_mut.async_copy_from(&image.data, &stream).unwrap();
+                        }
                     }
+                    
                     // generate SLM control pulse and calculate hologram 
                     match shared_state.cgh_mode {
                         CghMode:: CghInplane => {
-                            if image.frame_index % (50*40) == 0 {
-                              // rotatn_stage.lock().unwrap().move_rel(5.0);
+                            aout.set(1, shared_state.ao1.load());
+
+                            if dcam_frame_index % 50 == 0 {
+                                sample_z_stage.move_abs_fast(z_target_mm);
+                                shared_state.sample_z_position_mm.store(sample_z_stage.actual_position());
                             }
+
                             if shared_state.generate_new_holo.load(Relaxed) {
                                 // slm.lock().unwrap().read_target_img_file(&tgt_image_filename);
                                 // slm.lock().unwrap().calc_gs2d(10);
@@ -375,8 +385,8 @@ impl Cgh {
                                 // let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - (size.1 as f32)/2.0) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
                                 // let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32) * (slm.lock().unwrap().slm_size.0 as f32/size.0 as f32) ).floor() as i32;  
                                 // let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32) * (slm.lock().unwrap().slm_size.1 as f32/size.1 as f32) ).floor() as i32; 
-                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/3.0).floor() as i32;  
-                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/3.0).floor() as i32; 
+                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/2.5).floor() as i32;  
+                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/-2.5).floor() as i32; 
                                 let cghz:i32 = shared_state.shift_3d.load().2;
                                 println!("cghX: {}", cghy);
                                 println!("cghY: {}", cghx);
@@ -389,9 +399,16 @@ impl Cgh {
                             }
                         },
                         CghMode:: SpimCalib => {
+                            aout.set(1, shared_state.ao1.load());
+
+                            if dcam_frame_index % 50 == 0 {
+                                sample_z_stage.move_abs_fast(z_target_mm);
+                                shared_state.sample_z_position_mm.store(sample_z_stage.actual_position());
+                            }
+
                             if shared_state.generate_new_holo.load(Relaxed) {
-                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/3.0).floor() as i32;  
-                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/3.0).floor() as i32; 
+                                let cghx:i32 = ( (shared_state.shift_3d.load().0 as f32 - shared_state.cgh_zero_ord.load().0 as f32)/3.85).floor() as i32;  
+                                let cghy:i32 = ( (shared_state.shift_3d.load().1 as f32 - shared_state.cgh_zero_ord.load().1 as f32)/-3.85).floor() as i32; 
                                 let cghz:i32 = shared_state.shift_3d.load().2;
                                 println!("cghX: {}", cghy);
                                 println!("cghY: {}", cghx);
@@ -404,32 +421,136 @@ impl Cgh {
                                 slm.lock().unwrap().send_pong();
                             }
                         },
+                        CghMode::Stack2ch => {
+                            if dcam_frame_index % 2 == 0 {
+                                sample_z_stage.move_abs_fast(z_target_mm);
+                                shared_state.sample_z_position_mm.store(sample_z_stage.actual_position());
+                            }
+                        },
+                        CghMode:: Ondemand => {
+                            aout.set(0, shared_state.ao0.load());
+                            aout.set(1, shared_state.ao1.load());
+                            aout.set(2, shared_state.ao2.load());
+                            aout.set(3, shared_state.ao3.load());
+
+                            sample_z_stage.move_abs_fast(z_target_mm);
+                            shared_state.sample_z_position_mm.store(sample_z_stage.actual_position()); 
+                        
+                            if dcam_frame_index % 50 == 0 {
+                                if rotatn_stage_deg != shared_state.rotatn_stage_deg.load() {
+                                    rotatn_stage_deg = shared_state.rotatn_stage_deg.load();
+                                    // let deg: f32= (laser_2p_power/2000.0).sqrt().asin().to_degrees()/2.0;
+                                    rotatn_stage.lock().unwrap().move_abs(rotatn_stage_deg);
+                                }
+                            }
+                        },
                         _ => {
+                            sample_z_stage.move_abs_fast(z_target_mm);
+                            shared_state.sample_z_position_mm.store(sample_z_stage.actual_position()); 
                             // println!("CGH Calc TBD");
                         }
                     }
-
-                    if shared_state.cgh_mode == CghMode::Ondemand {
-                        aout.set(0, shared_state.ao0.load());
-                        aout.set(1, shared_state.ao1.load());
-                        aout.set(2, shared_state.ao2.load());
-                        aout.set(3, shared_state.ao3.load());
-                    }
-                    if shared_state.cgh_mode == CghMode::SpimCalib {
-                        aout.set(1, shared_state.ao1.load());
-                    }
-                    if shared_state.cgh_mode == CghMode::CghInplane {
-                        aout.set(1, shared_state.ao1.load());
-                    }
                     let save_divisor = shared_state.save_divisor.load(Relaxed);
-                    // debug!("Writing fl image");
-                    if write_img && (dcam_frame_index as usize % save_divisor as usize == 0) { 
+
+                    // update future frame index and pulse train
+                
+                    if shared_state.future_frame_index.load().is_none() {
+                        let pulse_train_period = 6.0*pulse_env_period;
+                        if shared_state.experiment_save_start.load(Relaxed) {
+                            if (inplane_slice_index as f32 == inplane_slices as f32*5.0 + 1.0) {
+                            // if (inplane_slice_index as f32 == inplane_slices as f32*0.5 + 1.0) {
+                                let z_sweep_f32 = dcam_frame_index as f32 / inplane_slices as f32;
+                                shared_state.future_frame_index.store(Some(z_sweep_f32.ceil() as u64 * inplane_slices as u64));
+                                let pulse_train_start_time = shared_state.future_frame_index.load().unwrap() as f64 * period_fast_plane;
+                                let pulsetrain_10ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        0.0);
+                                let pulsetrain_10ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        1.0*pulse_env_period);
+                                /* let pulsetrain_10ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        2.0*pulse_env_period); */
+                                let pulsetrain_20ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        2.0*pulse_env_period); 
+                                let pulsetrain_20ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        3.0*pulse_env_period); 
+                                /* let pulsetrain_20ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        5.0*pulse_env_period); */
+                                let pulsetrain_50ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        4.0*pulse_env_period);
+                                let pulsetrain_50ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        5.0*pulse_env_period);
+                                /* let pulsetrain_50ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                                                        pulse_env_duration, 
+                                                                        pulse_train_period,
+                                                                        shared_state.future_frame_index.load().unwrap() as usize,
+                                                                        8.0*pulse_env_period); */
+                                // let sources = [pulsetrain_10ms_2, pulsetrain_20ms_2, pulsetrain_50ms_2];
+                                let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2,
+                                                pulsetrain_20ms_1, pulsetrain_20ms_2,
+                                               pulsetrain_50ms_1, pulsetrain_50ms_2 ]; 
+                                /* let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2, pulsetrain_10ms_3,
+                                                pulsetrain_20ms_1, pulsetrain_20ms_2, pulsetrain_20ms_3,
+                                                pulsetrain_50ms_1, pulsetrain_50ms_2, pulsetrain_50ms_3]; */
+                                
+                                let mut pulse = DigitalOr { sources };
+                                scheduler.lock().unwrap().schedule(pulse_train_start_time, pulse);                                                                         
+                            }
+                        }
+                    }
+            
+                    // indicate start of experiment save
+                    if shared_state.experiment_save_start.load(Relaxed) {
+                        if let Some(start_frame_index) = shared_state.future_frame_index.load() {
+                            if dcam_frame_index == start_frame_index as i32 {
+                                debug!("experiment save started: image.frame_index = {dcam_frame_index}");
+                            }
+                            if write_img_mode && (dcam_frame_index >= start_frame_index as i32) { 
+                                fl_writer.write_all_u16(image.data).unwrap();
+                            }
+                            if (dcam_frame_index - start_frame_index as i32 + (inplane_slices as f32*0.5).round() as i32 ) % (inplane_slices as i32*2*3) == 0 {
+                                if dcam_frame_index > start_frame_index as i32 { 
+                                    let deg = 1.0;
+                                    rotatn_stage.lock().unwrap().move_rel(deg);
+                                    total_deg_move += deg;
+                                    println!("2P laser pwr change at frame index: {}", dcam_frame_index-start_frame_index as i32);
+                                }
+                            }
+                        }
+                    }
+                    
+                    /* 
+                    if shared_state.experiment_save_start.load(Relaxed) && write_img_mode && (dcam_frame_index as usize % save_divisor as usize == 0) { 
                         fl_writer.write_all_u16(image.data).unwrap();
                     }
+                    
                     if shared_state.save_img.load(Relaxed) {
                         fl_writer.write_all_u16(image.data).unwrap();
                         shared_state.save_img.store(false, Relaxed);    
                     }
+                    
                     if shared_state.start_calib.load(Relaxed) {
                         spim_data.lock().unwrap().create_calib_file();
                         shared_state.start_calib.store(false, Relaxed);
@@ -444,9 +565,10 @@ impl Cgh {
                         shared_state.stop_calib.store(false, Relaxed);
                     }
                     if shared_state.save_expt.load(Relaxed) {
-                        spim_data.lock().unwrap().create_expt_params_file(z_start_mm, z_end_mm, z_step_mm, period_fast, &pulse_env);
+                        spim_data.lock().unwrap().create_expt_params_file(z_start_mm, z_end_mm, z_step_mm, period_fast, pulse_env);
                         shared_state.save_expt.store(false, Relaxed);
                     }
+                    */
                     if stop.load(Relaxed) || thread_panic.load(Relaxed) {
                         break;
                     }
@@ -457,6 +579,7 @@ impl Cgh {
                 thread_panic.store(true, Relaxed);
             }
             fl_writer.flush().unwrap();
+            rotatn_stage.lock().unwrap().move_rel(-1.0 * total_deg_move);
             aout.stop();
             dout.stop();
             dout.set(0);
