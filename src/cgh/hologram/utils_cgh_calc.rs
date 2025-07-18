@@ -1,3 +1,4 @@
+/* 
 #![allow(warnings)]
 use std::{
     io::{Write, BufWriter},
@@ -9,10 +10,8 @@ use ndarray::{array, ArrayView};
 use arrayfire::*;
 use num_complex::Complex;
 use std::f32::consts::PI;
-use zmq::Context;
 use std::thread::*;
 use std::time::Duration;
-
 
 pub fn arr_floattocplx(array_real:&Array<f32>, array_imag: &Array<f32>) -> Array<c32> {
     assert_eq!(array_real.elements(), array_imag.elements());
@@ -56,3 +55,4 @@ pub fn rotate_xy(x: i32,y: i32) -> (i32,i32){
     // println!("\nXY: {}\n", rot_xy);
     (rot_xy[0].floor() as i32, rot_xy[1].floor() as i32)
 }
+*/

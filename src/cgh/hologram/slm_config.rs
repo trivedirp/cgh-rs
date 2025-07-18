@@ -4,31 +4,48 @@ use std::{
         atomic::{AtomicBool, Ordering::Relaxed},Arc, Mutex, 
     }
 };
-use num_complex::Complex;
-use arrayfire::*;
 use std::f32::consts::PI;
-use crate::{arr_absargtocplx, arr_floattocplx, binarize, rotate_xy, ZmqServer, CghMode};
+use crate::{cgh::hologram::fft_helper, CghMode, CuHelper, FftHelper, ZmqServer};
+use cust::prelude::*;
+use rand::random;
+use gpu_utils::c32;
 
 use super::zmq_server;
 pub struct SLMConfig {
     pub slm_size: (u64, u64),
+    N: usize,
     pub slm_bitdepth: i32,
-    dims: Dim4,
-    target_img: Array<f32>, 
-    phase_mask: Array<u8>,
+    d_target_img: DeviceBuffer::<f32>, 
+    d_phase_mask: DeviceBuffer::<u8>,
+    stream: Arc<Stream>,
+    cu_helper: Arc<CuHelper>,
+    fft_helper: Arc<FftHelper>,
     zmq_server: Option<ZmqServer>,
 }
 
 impl SLMConfig {
     pub fn new(slm_size: (u64, u64), slm_bitdepth: i32, cgh_mode: CghMode) -> Self {
-        let server_on = cgh_mode == CghMode::CghInplane || cgh_mode == CghMode::SpimCalib;
-        // let server_on = cgh_mode == CghMode::CghInplane;
-        // let server_on = false;
+        let N = (slm_size.0 * slm_size.1) as usize;
+        let d_target_img = DeviceBuffer::<f32>::zeroed(N).unwrap();
+        let d_phase_mask = DeviceBuffer::<u8>::zeroed(N).unwrap();
+        let server_on = cgh_mode == CghMode::CghInplane;
+        // let server_on = cgh_mode == CghMode::CghInplane || cgh_mode == CghMode::SpimCalib;
+        
+        cust::init(cust::CudaFlags::empty()).unwrap();
+        let device = Device::get_device(0).unwrap();
+        let _ctx = Context::new(device).unwrap();
+        let stream = Arc::new(Stream::new(StreamFlags::DEFAULT, None).unwrap());
+        let cu_helper= Arc::new(CuHelper::new(slm_size, stream.clone()));
+        let fft_helper= Arc::new(FftHelper::new(slm_size, stream.clone()));
+            
         Self { slm_size,
+            N,
             slm_bitdepth,
-            dims: Dim4::new(&[slm_size.0, slm_size.1, 1, 1]),
-            target_img: constant(0.0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
-            phase_mask: constant(0, Dim4::new(&[slm_size.0, slm_size.1, 1, 1])),
+            d_target_img,
+            d_phase_mask,
+            stream,
+            cu_helper,
+            fft_helper,
             zmq_server: if server_on {
                 Some(ZmqServer::new())
             } else {
@@ -38,38 +55,35 @@ impl SLMConfig {
     }
 
     #[inline]
+    /*
     pub fn read_target_img_file(&mut self, filepath: &PathBuf) -> Result<()> {
         let mut file = File::open(filepath).unwrap(); 
         let mut reader: BufReader<File> = BufReader::new(file);
         let mut buffer = vec!(u8::default(); self.target_img.elements() * 4);
-        reader.read_exact(&mut buffer)?;
+        reader.read_exact(&mut buffer).unwrap();
 
         let mut target_img_vec = vec!(f32::default(); self.target_img.elements());
         target_img_vec = buffer.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
         self.target_img  = Array::new(&target_img_vec, self.dims);
         Ok(())
     }
-
+    */
     pub fn read_phase_mask_file(& mut self, filepath: &PathBuf) -> Result<()> {
         let mut file = File::create(filepath).unwrap(); 
-        let mut buffer = vec!(u8::default(); self.phase_mask.elements());
+        let mut buffer = vec![u8::default(); self.N];
         file.read_exact(&mut buffer);
-        self.phase_mask = Array::new(&buffer, self.dims);
+        self.d_phase_mask.copy_from(&buffer);
         Ok(())
     } 
     
     pub fn write_phase_mask_file(&mut self, filepath: &PathBuf) -> Result<()> {
-        let mut file = File::create(filepath).unwrap(); 
-        let mut buffer = vec!(u8::default(); self.phase_mask.elements());
-        // let mut phase_mask_xpose = transpose(&self.phase_mask, false);
-        // phase_mask_xpose.host(&mut buffer);
-        self.phase_mask.host(&mut buffer);
-        // let _ = file.write_all(&mut buffer);
-        let mut writer = BufWriter::new(file);
-        for value in &buffer {
-            writer.write_all(&value.to_le_bytes())?;
-        }
-        writer.flush()?;
+        let mut buffer = vec![u8::default(); self.N];
+        self.d_phase_mask.copy_to(&mut buffer);  
+        // Write to file (as flat binary)
+        let mut file = File::create("slm_ph_GS2D.bin").unwrap();
+        for val in buffer.iter() {
+            file.write_all(&val.to_le_bytes()).unwrap();
+        } 
 
         match &self.zmq_server {
             Some(zmq_server) => {
@@ -94,116 +108,93 @@ impl SLMConfig {
         Ok(())
     }
 
-    pub fn calc_gs2d(&mut self, n_iter:i32) {
-        // set_backend(Backend::CUDA); // Or Backend::OPENCL
-        // set_device(0);          
-        let img_size_x = self.slm_size.0;
-        let img_size_y = self.slm_size.1; 
+    pub fn calc_gs2d(&mut self, n_iter:i32) {   
+        let stream = self.stream.clone();  
         let slm_size_x = self.slm_size.0;
         let slm_size_y = self.slm_size.1;
         let slmc_x = slm_size_x as i32/2;
         let slmc_y = slm_size_y as i32/2;
-        let imgc_x= img_size_x as i32/2;
-        let imgc_y= img_size_y as i32/2;
 
         let dk:f32 = 1.0; // Assuming dk is defined somewhere in your context
         let beam_wid = 50.0; // Example value, adjust as necessary
 
-        let img_amp_ref = constant::<f32>(1.0, self.dims);  // Placeholder for actual target image
-        let img_ph_init = randu::<f32>(self.dims) * 2.0 as f32*PI;
-        let slm_amp_gauss = gaussian_kernel(slm_size_x.try_into().unwrap(), slm_size_y.try_into().unwrap(), beam_wid, beam_wid);
-        let m = max_all(&slm_amp_gauss).0;
-        let slm_amp_ref = slm_amp_gauss / m;
-        let slm_ph_init = randu::<f32>(self.dims) * 2.0 as f32*PI;
+        let mut d_slm_amp_ref = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_slm_ph_init = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_slm_field = DeviceBuffer::<c32>::zeroed(self.N).unwrap();
+        let mut d_img_amp_ref = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_img_ph_init = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_img_field = DeviceBuffer::<c32>::zeroed(self.N).unwrap();
 
-        // let mut slm_field = cplx2(&slm_amp_ref, &slm_ph_init, false);
-        // let mut img_field = cplx2(&img_amp_ref, &img_ph_init, false);
-        let mut slm_field = arr_floattocplx(&slm_amp_ref, &slm_ph_init);
-        let mut img_field = arr_floattocplx(&img_amp_ref, &img_ph_init);
-    
-        for _i in 0..n_iter {
-            // slm_field = fft2(&img_field, 1.0, 0, 0);
-            slm_field = shift( &fft2(&shift(&img_field, &[imgc_x,imgc_y,0,0]), 1.0, 0, 0), &[imgc_x,imgc_y,0,0] );
-            let slm_ph_calc = arg(&slm_field);
-            // discretize function needs to be implemented based on your discretization strategy
-            // let slm_ph_calc_discr = discretize(&slm_ph_calc); // Placeholder for actual discretization function
-            // slm_field = cplx2(&slm_amp_ref, &slm_ph_calc, false);
-            slm_field = arr_absargtocplx(&slm_amp_ref, &slm_ph_calc);
+        let slm_amp_ref = vec![1.0; self.N]; // Gaussian, normalized, as Vec<f32>
+        let slm_ph_init: Vec<f32> = (0..self.N)
+            .map(|_| rand::random::<f32>()*2.0*PI)
+            .collect(); 
+        let img_amp_ref = vec![1.0; self.N];
+        let img_ph_init = vec![0.0; self.N]; 
 
-            // img_field = fft2(&slm_field, 1.0,0, 0);
-            img_field = shift( &fft2(&shift(&slm_field, &[slmc_x,slmc_y,0,0]), 1.0,0, 0), &[slmc_x,slmc_y,0,0] );
-            let img_ph_calc = arg(&img_field);
-            let img_amp_calc = abs(&img_field);
-            // img_field = cplx2(&img_amp_ref, &img_ph_calc, false); // img E field for next iteration
-            img_field = arr_absargtocplx(&img_amp_ref, &img_ph_calc); 
-    
-            // Error metrics calculation (adapt as necessary)
-            // Note: Implement your own error metrics calculation based on the provided Julia code
+        d_slm_amp_ref.copy_from(&slm_amp_ref).unwrap();
+        d_slm_ph_init.copy_from(&slm_ph_init).unwrap();
+        d_img_amp_ref.copy_from(&img_amp_ref).unwrap();
+        d_img_ph_init.copy_from(&img_ph_init).unwrap();
+
+        self.cu_helper.float_to_cplx(&d_slm_amp_ref, &d_slm_ph_init, &d_slm_field);
+        self.cu_helper.float_to_cplx(&d_img_amp_ref, &d_img_ph_init, &d_img_field);
+        
+        let mut d_slm_ph_calc = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_img_ph_calc = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_img_amp_calc = DeviceBuffer::<f32>::zeroed(self.N).unwrap();
+        let mut d_slm_ph_calc_bin = DeviceBuffer::<u8>::zeroed(self.N).unwrap();
+
+        let n_iter = 10;
+        for _ in 0..n_iter {
+            // (a) SLM field = shift(fft2(shift(img_field)))
+            self.fft_helper.cfft(&d_slm_field, &d_img_field, 1 as i32);
+
+            // (b) slm_ph_calc = arg(slm_field)
+            self.cu_helper.get_arg(&d_slm_field, &d_slm_ph_calc);
+
+            // (c) slm_field = arr_absargtocplx(slm_amp_ref, slm_ph_calc)
+            self.cu_helper.abs_arg_to_cplx(&d_slm_amp_ref, &d_slm_ph_calc, &d_slm_field);
+
+            // (d) img_field = shift(fft2(shift(slm_field)))
+            self.fft_helper.cfft(&d_img_field, &d_slm_field, -1 as i32);
+
+            // (e) img_ph_calc = arg(img_field)
+            self.cu_helper.get_arg(&d_img_field, &d_img_ph_calc);
+
+            // (f) img_amp_calc = abs(img_field)
+            self.cu_helper.get_abs(&d_img_field, &d_img_amp_calc);
+
+            // (g) img_field = arr_absargtocplx(img_amp_ref, img_ph_calc)
+            self.cu_helper.abs_arg_to_cplx(&d_img_amp_ref, &d_img_ph_calc, &d_img_field);
+
         }
-        self.phase_mask = binarize(&arg(&slm_field), self.slm_bitdepth);         
+
+        self.cu_helper.binarize(&d_slm_ph_calc, &d_slm_ph_calc_bin);
+
+        let mut output = vec![u8::default(); self.N];
+        d_slm_ph_calc_bin.copy_to(&mut output).unwrap();  
+        // Write to file (as flat binary)
+        let mut file = File::create("slm_ph_GS2D.bin").unwrap();
+        for val in output.iter() {
+            file.write_all(&val.to_le_bytes()).unwrap();
+        }      
     }
 
-    pub fn calc_superpos3d(&mut self, shift_3d:(i32,i32,i32)) {
-        // set_backend(Backend::CUDA); // Or Backend::OPENCL
-        // set_device(0);    
-        let n_water = 1.33;
-        let lambda = 1.0;    
-        let k_total = 2.0*PI*n_water/lambda;  
-        let img_size_x = self.slm_size.0;
-        let img_size_y = self.slm_size.1; 
-        let slm_size_x = self.slm_size.0;
-        let slm_size_y = self.slm_size.1;
-        let slmc_x = slm_size_x as i32/2;
-        let slmc_y = slm_size_y as i32/2;
-        let imgc_x= img_size_x as i32/2;
-        let imgc_y= img_size_y as i32/2;
-        let dk: f32 = 2.0*PI/(img_size_x as f32); 
-        // let shift_3d = (0, 20, 0);   
-        //****
-        // shift_3d.0 is shift_y : SLM X is camera Y... 
-        let (x_shift, y_shift) = rotate_xy(shift_3d.1,shift_3d.0);
-        //****
-        let z_shift = shift_3d.2;
-        let kx_shift = 2.0*PI/(x_shift as f32+1e-2);
-        let ky_shift = 2.0*PI/(y_shift as f32+1e-2);
-        let pitch_x_pix = (kx_shift/dk).floor();
-        let pitch_y_pix = (ky_shift/dk).floor();
-        println!("cghX: {}", shift_3d.0);
-        println!("cghY: {}", shift_3d.1);
-        println!("pitchX: {}", pitch_x_pix);
-        println!("pitchY: {}", pitch_y_pix);
+    pub fn calc_superpos3d(&mut self, shift_3d:(i32,i32,i32)) {     
+        let shift_3d = (10, 10, 0);   
+        let mut d_slm_ph_mod2pi = DeviceBuffer::<f32>::zeroed(self.N).unwrap();        
+        let mut d_slm_ph_mod2pi_bin = DeviceBuffer::<u8>::zeroed(self.N).unwrap();        
+        self.cu_helper.compute_slm_phase(&mut d_slm_ph_mod2pi, shift_3d);
+        self.cu_helper.binarize(&d_slm_ph_mod2pi, &mut d_slm_ph_mod2pi_bin);
 
-        let mut k_tot_sq: Array<f32> = constant::<f32>(k_total*k_total, self.dims);  
-        let mut pitch_x: Array<f32> = constant::<f32>(pitch_x_pix.abs(), self.dims);  
-        let mut pitch_y: Array<f32> = constant::<f32>(pitch_y_pix.abs(), self.dims);  
-        let mut arr_2pi = constant::<f32>(2.0*PI, self.dims);
-    
-        let vec_pix_x: Vec<i32> = (1..=img_size_x as i32).collect();
-        let vec_pix_y: Vec<i32> = (1..=img_size_y as i32).collect();
-        let dims_x = Dim4::new(&[img_size_x, 1, 1, 1]);
-        let dims_y = Dim4::new(&[1, img_size_y, 1, 1]);
-        let arr_x = Array::new(&vec_pix_x, dims_x);
-        let arr_y = Array::new(&vec_pix_y, dims_y);
-        let pix_x = tile(&arr_x, dims_y);
-        let pix_y = tile(&arr_y, dims_x);
-        let a_slmc_x: Array<i32> = constant::<i32>(slmc_x, self.dims);  
-        let a_slmc_y: Array<i32> = constant::<i32>(slmc_y, self.dims); 
-        
-        let k_x = sub(&pix_x, &a_slmc_x, true) * dk;
-        let k_y = sub(&pix_y, &a_slmc_y,true) * dk;
-        let k_xy_sq = add(&mul(&k_x, &k_x,true), &mul(&k_y, &k_y, true), true);
-        let k_z = sqrt( &sub(&k_tot_sq, &k_xy_sq, true) );
-        let phz = z_shift*k_z;
-        let phx: Array<f32> = modulo(&pix_x, &pitch_x, true) * 2.0 as f32 * PI / pitch_x_pix;
-        let phy: Array<f32> = modulo(&pix_y, &pitch_y, true) * 2.0 as f32 * PI / pitch_y_pix;
-        
-        let slm_ph = add(&add(&phx, &phy, true), &phz, true);
-        let slm_ph1 = modulo(&slm_ph, &arr_2pi, true);
-        let slm_ph2 = add(&slm_ph1, &arr_2pi, true);
-        let slm_ph_mod2pi = modulo(&slm_ph2, &arr_2pi, true);
-
-        self.phase_mask = binarize(&slm_ph_mod2pi, self.slm_bitdepth); 
-
+        let mut output = vec![u8::default(); self.N];
+        d_slm_ph_mod2pi_bin.copy_to(&mut output).unwrap();  
+        // Write to file (as flat binary)
+        let mut file = File::create("slm_ph_superpos.bin").unwrap();
+        for val in output.iter() {
+            file.write_all(&val.to_le_bytes()).unwrap();
+        }   
     }
 }
     

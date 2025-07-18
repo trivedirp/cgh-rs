@@ -11,7 +11,6 @@ use log::{debug, info};
 use nimhddk::XSeriesDevice;
 use npp::StreamContext;
 use npp_sys::cudaSetDevice;
-use arrayfire::{set_device, set_backend, Backend};
 use std::{
     io::Write,
     panic::{self, AssertUnwindSafe},
@@ -65,11 +64,12 @@ impl Cgh {
         // camera.set_exposure(0.00144);
         camera.set_exposure(0.00398);
         // camera.set_trigger_global_exposure(dcam::TriggerGlobalExposure::GlobalReset);  
-        
+        /* 
         camera.properties.set_width(1024 * 2);
         camera.properties.set_height(512 * 2);
         camera.properties.set_offset_x(512 * 2);
         camera.properties.set_offset_y(256 * 2);
+        */
         println!("New dimensions ({} x {})", camera.width(), camera.height());
         
         let calibration_side_488 = SpimCalibration::new(0.0, 0.0);
@@ -79,8 +79,10 @@ impl Cgh {
         let shared_state = Arc::new(SharedState::new(cgh_mode, size));
         let camera = Arc::new(Mutex::new(camera));
 
-        let slm_size_x = 1920;
-        let slm_size_y = 1152;
+        // let slm_size_x = 1920;
+        // let slm_size_y = 1152;
+        let slm_size_x = 4;
+        let slm_size_y = 4;
         let slm_size = (slm_size_x, slm_size_y);
         let slm_bitdepth = 8;
 
@@ -89,8 +91,9 @@ impl Cgh {
         // let fl_path = if cgh_mode != CghMode::Ondemand { Arc::new(Some(data_raw_timestamp("/data", true, &timestamp))) } else { Arc::new(None) };
         // let fl_path = Arc::new(Some(data_raw_timestamp("/data", true, &timestamp)));
         let fl_path = Arc::new(data_raw_timestamp("/data", true, &timestamp));
-       
+
         let slm = Arc::new(Mutex::new(SLMConfig::new(slm_size, slm_bitdepth, cgh_mode)));
+
         if cgh_mode == CghMode::Stack488  || cgh_mode == CghMode::Stack561 || cgh_mode == CghMode::Stack2ch || cgh_mode == CghMode::Ondemand {
             shared_state.future_frame_index.store(Some(0));
         }
@@ -310,6 +313,7 @@ impl Cgh {
         let fl_path = self.fl_path.clone();  
         let n_buffers = 3;
         let mut total_deg_move = 0.0;
+        let mut start_new_pulsetrain = false;
        
         // let fl_filename =  if self.shared_state.cgh_mode != CghMode::Ondemand { self.fl_path.clone().unwrap().join("fl.bin")} else {PathBuf::from("")};
         let fl_filename =  fl_path.join("fl.bin");
@@ -317,8 +321,8 @@ impl Cgh {
 
         self.thread = Some(spawn(move || {
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                set_backend(Backend::CUDA); // Or Backend::OPENCL
-                set_device(0);
+                // set_backend(Backend::CUDA); // Or Backend::OPENCL
+                // set_device(0);
                 unsafe {
                     cudaSetDevice(gpu_index);
                 }
@@ -394,6 +398,7 @@ impl Cgh {
                                 println!("Zero ord Y: {}", shared_state.cgh_zero_ord.load().1);
                                 slm.lock().unwrap().calc_superpos3d((cghx, cghy, cghz));
                                 let _ = slm.lock().unwrap().write_phase_mask_file(&phasemask_filename);
+                                start_new_pulsetrain = true;
                                 shared_state.generate_new_holo.store(false, Relaxed);
 
                             }
@@ -416,6 +421,7 @@ impl Cgh {
                                 println!("Zero ord Y: {}", shared_state.cgh_zero_ord.load().1);
                                 slm.lock().unwrap().calc_superpos3d((cghx, cghy, cghz));
                                 let _ = slm.lock().unwrap().write_phase_mask_file(&phasemask_filename);
+                                start_new_pulsetrain = true;
                                 shared_state.generate_new_holo.store(false, Relaxed);
                             } else {
                                 slm.lock().unwrap().send_pong();
@@ -458,71 +464,74 @@ impl Cgh {
                         let pulse_train_period = 6.0*pulse_env_period;
                         if shared_state.experiment_save_start.load(Relaxed) {
                             if (inplane_slice_index as f32 == inplane_slices as f32*5.0 + 1.0) {
-                            // if (inplane_slice_index as f32 == inplane_slices as f32*0.5 + 1.0) {
                                 let z_sweep_f32 = dcam_frame_index as f32 / inplane_slices as f32;
                                 shared_state.future_frame_index.store(Some(z_sweep_f32.ceil() as u64 * inplane_slices as u64));
-                                let pulse_train_start_time = shared_state.future_frame_index.load().unwrap() as f64 * period_fast_plane;
-                                let pulsetrain_10ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                // let start_pulsetrain_frameindex = future_frame_index.load().unwrap() as usize;
+                                if start_new_pulsetrain { 
+                                    let pulse_train_start_time = shared_state.future_frame_index.load().unwrap() as f64 * period_fast_plane;
+                                    let pulsetrain_10ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         0.0);
-                                let pulsetrain_10ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                    let pulsetrain_10ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         1.0*pulse_env_period);
-                                /* let pulsetrain_10ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
+                                    /* let pulsetrain_10ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 10.0e-3, offset_s: t0 }, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         2.0*pulse_env_period); */
-                                let pulsetrain_20ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                    let pulsetrain_20ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         2.0*pulse_env_period); 
-                                let pulsetrain_20ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                    let pulsetrain_20ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         3.0*pulse_env_period); 
-                                /* let pulsetrain_20ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
+                                    /* let pulsetrain_20ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 20.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         5.0*pulse_env_period); */
-                                let pulsetrain_50ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                    let pulsetrain_50ms_1 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         4.0*pulse_env_period);
-                                let pulsetrain_50ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                    let pulsetrain_50ms_2 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         5.0*pulse_env_period);
-                                /* let pulsetrain_50ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
+                                    /* let pulsetrain_50ms_3 = LivePulseTrain::new(PulseData {period_s: pulse_period, on_s: 50.0e-3, offset_s: t0}, 
                                                                         pulse_env_duration, 
                                                                         pulse_train_period,
                                                                         shared_state.future_frame_index.load().unwrap() as usize,
                                                                         8.0*pulse_env_period); */
-                                // let sources = [pulsetrain_10ms_2, pulsetrain_20ms_2, pulsetrain_50ms_2];
-                                let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2,
+                                    // let sources = [pulsetrain_10ms_2, pulsetrain_20ms_2, pulsetrain_50ms_2];
+                                    let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2,
                                                 pulsetrain_20ms_1, pulsetrain_20ms_2,
                                                pulsetrain_50ms_1, pulsetrain_50ms_2 ]; 
-                                /* let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2, pulsetrain_10ms_3,
+                                    /* let sources = [ pulsetrain_10ms_1, pulsetrain_10ms_2, pulsetrain_10ms_3,
                                                 pulsetrain_20ms_1, pulsetrain_20ms_2, pulsetrain_20ms_3,
                                                 pulsetrain_50ms_1, pulsetrain_50ms_2, pulsetrain_50ms_3]; */
-                                
-                                let mut pulse = DigitalOr { sources };
-                                scheduler.lock().unwrap().schedule(pulse_train_start_time, pulse);                                                                         
+                                    let mut pulse = DigitalOr { sources };
+                                    scheduler.lock().unwrap().schedule(pulse_train_start_time, pulse);   
+                                }  
+                                start_new_pulsetrain = false;                                                                    
                             }
                         }
                     }
             
                     // indicate start of experiment save
                     if shared_state.experiment_save_start.load(Relaxed) {
+                        start_new_pulsetrain = true;
                         if let Some(start_frame_index) = shared_state.future_frame_index.load() {
                             if dcam_frame_index == start_frame_index as i32 {
                                 debug!("experiment save started: image.frame_index = {dcam_frame_index}");

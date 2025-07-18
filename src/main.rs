@@ -35,7 +35,7 @@ fn main() {
     let stop_cgh = Arc::new(AtomicBool::new(false));
     let mut cgh_ui = CghUI::new(cgh.size, cgh_stream);
     cgh.start(gpu_index, stop_cgh.clone(), thread_panic.clone());
-    
+
     cgh_ui.run_event_loop(&cgh_state);
     
     stop_cgh.store(true, Relaxed);
